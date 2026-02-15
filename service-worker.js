@@ -41,21 +41,32 @@ const pendingReqHeaders = {};
 
 // Queue to prevent race conditions when saving items
 const saveQueue = {};
-async function queuedSave(key, requestId, itemData) {
+async function queuedSave(key, requestId, itemData, url) {
   // Create queue for this key if it doesn't exist
   if (!saveQueue[key]) {
     saveQueue[key] = Promise.resolve();
   }
-  
+
   // Chain this save operation
   saveQueue[key] = saveQueue[key].then(async () => {
     const stored = await chrome.storage.local.get([key]);
     const items = stored[key] || {};
+
+    // Check for duplicates inside the queue to prevent race conditions
+    if (url && Object.values(items).some((item) => item.url === url)) {
+      return null; // Duplicate found, skip saving
+    }
+
+    // Check for max items limit
+    if (Object.keys(items).length >= 50) {
+      return null; // Max items reached, skip saving
+    }
+
     items[requestId] = itemData;
     await chrome.storage.local.set({ [key]: items });
     return items;
   });
-  
+
   return saveQueue[key];
 }
 
@@ -664,10 +675,11 @@ chrome.webRequest.onResponseStarted.addListener(
     const name = deriveFilename(url, responseHeaders, kind === 'stream' ? 'stream.m3u8' : 'subtitle');
     const key = kind === 'stream' ? `streams_${tabId}` : `subs_${tabId}`;
 
-    // Check for duplicates before queuing
+    // Early-exit optimization: Check for duplicates and limits before expensive operations
+    // Note: The actual duplicate check inside queuedSave is the authoritative check
     const stored = await chrome.storage.local.get([key]);
     const items = stored[key] || {};
-    
+
     if (Object.values(items).some((item) => item.url === url)) {
       return;
     }
@@ -725,8 +737,13 @@ chrome.webRequest.onResponseStarted.addListener(
       }
     }
     
-    await queuedSave(key, requestId, itemData);
-    
+    const result = await queuedSave(key, requestId, itemData, url);
+
+    // If queuedSave returned null, it means the item was a duplicate or limit was reached
+    if (result === null) {
+      return;
+    }
+
     await updateBadge(tabId);
 
     // Try to notify popup with the actual item data
