@@ -38,7 +38,11 @@
       gap: 6px;
     }
     .header-title svg { flex-shrink: 0; }
-    .btn-clear {
+    .header-actions {
+      display: flex;
+      gap: 6px;
+    }
+    .btn-select-all, .btn-clear {
       background: rgba(255,255,255,0.2);
       border: none;
       color: #fff;
@@ -48,7 +52,8 @@
       cursor: pointer;
       transition: background 0.15s;
     }
-    .btn-clear:hover { background: rgba(255,255,255,0.35); }
+    .btn-select-all:hover, .btn-clear:hover { background: rgba(255,255,255,0.35); }
+    .btn-select-all.all-selected { background: rgba(255,255,255,0.45); }
 
     /* ── Scroll container ────────────────────────────────── */
     #list-container {
@@ -222,7 +227,10 @@
     </svg>
     Subtitle Catcher
   </div>
-  <button class="btn-clear" id="btn-clear">Clear all</button>
+  <div class="header-actions">
+    <button class="btn-select-all" id="btn-select-all" title="Select all subtitles">Select all</button>
+    <button class="btn-clear" id="btn-clear">Clear all</button>
+  </div>
 </div>
 
 <div id="list-container">

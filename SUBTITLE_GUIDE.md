@@ -151,10 +151,14 @@ IINA uses mpv internally, so everything above works. Additional IINA features:
 
 1. **Extension popup shows:**
    - 🟠 Stream: `master.m3u8`
-   - 🔵 Subtitle: `english.vtt` ☑️ (checked)
-   - 🔵 Subtitle: `spanish.srt` ☑️ (checked)
+   - 🔵 Subtitle: `english.vtt` 🌐 English (detected) ☑️
+   - 🔵 Subtitle: `spanish.srt` 🌐 Spanish (detected) ☑️
 
-2. **Click mpv button → generates:**
+2. **Quick select with "Select all" button:**
+   - Click "Select all" to check all subtitle checkboxes at once
+   - Click again to deselect all
+
+3. **Click mpv button → generates:**
    ```bash
    mpv --http-header-fields='...' \
        --sub-file='https://.../english.vtt' \
@@ -162,7 +166,7 @@ IINA uses mpv internally, so everything above works. Additional IINA features:
        'https://.../master.m3u8'
    ```
 
-3. **Run command → mpv opens with:**
+4. **Run command → mpv opens with:**
    - Video playing
    - English subtitles visible by default
    - Press `j` → switches to Spanish

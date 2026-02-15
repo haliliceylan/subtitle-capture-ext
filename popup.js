@@ -2,11 +2,121 @@
 // Subtitle Catcher — Popup Script
 // ============================================================
 
+// Language code to name mapping
+const LANGUAGE_NAMES = {
+  'en': 'English', 'es': 'Spanish', 'fr': 'French', 'de': 'German', 'it': 'Italian',
+  'pt': 'Portuguese', 'ru': 'Russian', 'ja': 'Japanese', 'ko': 'Korean', 'zh': 'Chinese',
+  'ar': 'Arabic', 'hi': 'Hindi', 'tr': 'Turkish', 'pl': 'Polish', 'nl': 'Dutch',
+  'sv': 'Swedish', 'da': 'Danish', 'no': 'Norwegian', 'fi': 'Finnish', 'el': 'Greek',
+  'he': 'Hebrew', 'th': 'Thai', 'vi': 'Vietnamese', 'id': 'Indonesian', 'ms': 'Malay',
+  'cs': 'Czech', 'sk': 'Slovak', 'hu': 'Hungarian', 'ro': 'Romanian', 'bg': 'Bulgarian',
+  'uk': 'Ukrainian', 'hr': 'Croatian', 'sr': 'Serbian', 'sl': 'Slovenian', 'et': 'Estonian',
+  'lv': 'Latvian', 'lt': 'Lithuanian', 'fa': 'Persian', 'ur': 'Urdu', 'bn': 'Bengali',
+  'ta': 'Tamil', 'te': 'Telugu', 'ml': 'Malayalam', 'kn': 'Kannada', 'mr': 'Marathi',
+  'gu': 'Gujarati', 'pa': 'Punjabi', 'sw': 'Swahili', 'af': 'Afrikaans', 'ca': 'Catalan',
+  'eu': 'Basque', 'gl': 'Galician', 'hy': 'Armenian', 'ka': 'Georgian', 'mn': 'Mongolian',
+  'ne': 'Nepali', 'si': 'Sinhala', 'km': 'Khmer', 'lo': 'Lao', 'my': 'Burmese',
+  'am': 'Amharic', 'zu': 'Zulu', 'xh': 'Xhosa', 'yo': 'Yoruba', 'ig': 'Igbo',
+  'ha': 'Hausa', 'tl': 'Filipino', 'jv': 'Javanese', 'su': 'Sundanese', 'mg': 'Malagasy',
+  'nb': 'Norwegian Bokmål', 'nn': 'Norwegian Nynorsk', 'zh-cn': 'Chinese (Simplified)', 
+  'zh-tw': 'Chinese (Traditional)', 'pt-br': 'Portuguese (Brazil)', 'pt-pt': 'Portuguese (Portugal)',
+  'es-419': 'Spanish (Latin America)', 'en-gb': 'English (UK)', 'en-us': 'English (US)'
+};
+
+// Cache for detected languages
+const languageCache = new Map();
+
+// Detect language from subtitle content
+async function detectSubtitleLanguage(url, headers = {}) {
+  if (languageCache.has(url)) {
+    return languageCache.get(url);
+  }
+  
+  try {
+    // Fetch first ~5KB of subtitle file for language detection
+    const fetchHeaders = new Headers();
+    Object.entries(headers).forEach(([k, v]) => fetchHeaders.set(k, v));
+    
+    const response = await fetch(url, { 
+      method: 'GET',
+      headers: fetchHeaders,
+      signal: AbortSignal.timeout(5000)
+    });
+    
+    if (!response.ok) return null;
+    
+    const text = await response.text();
+    
+    // Extract text content from subtitle formats (remove timestamps, indices, tags)
+    const contentText = extractSubtitleText(text);
+    
+    if (!contentText || contentText.length < 20) return null;
+    
+    // Use Chrome's built-in language detection API
+    const result = await chrome.i18n.detectLanguage(contentText.substring(0, 2000));
+    
+    if (result?.languages?.length > 0) {
+      const detected = result.languages[0];
+      if (detected.percentage > 50) {
+        const langCode = detected.language.toLowerCase();
+        languageCache.set(url, langCode);
+        return langCode;
+      }
+    }
+    
+    return null;
+  } catch (e) {
+    console.warn('Language detection failed:', e);
+    return null;
+  }
+}
+
+// Extract plain text from subtitle content (SRT, VTT, ASS, etc.)
+function extractSubtitleText(rawText) {
+  let text = rawText;
+  
+  // Remove WebVTT header
+  text = text.replace(/^WEBVTT.*?\n\n/gis, '');
+  
+  // Remove SRT/VTT timestamp lines (e.g., "00:00:01,000 --> 00:00:04,000" or "00:00:01.000 --> 00:00:04.000")
+  text = text.replace(/\d{1,2}:\d{2}:\d{2}[,.]\d{3}\s*-->\s*\d{1,2}:\d{2}:\d{2}[,.]\d{3}[^\n]*/g, '');
+  
+  // Remove numeric indices (SRT format)
+  text = text.replace(/^\d+\s*$/gm, '');
+  
+  // Remove ASS/SSA style tags and headers
+  text = text.replace(/\{\\[^}]+\}/g, '');
+  text = text.replace(/^\[Script Info\].*?\n\n/gis, '');
+  text = text.replace(/^\[V4\+? Styles\].*?\n\n/gis, '');
+  text = text.replace(/^Format:.*$/gm, '');
+  text = text.replace(/^Style:.*$/gm, '');
+  text = text.replace(/^Dialogue:.*?,/gm, '');
+  
+  // Remove HTML/VTT tags
+  text = text.replace(/<[^>]+>/g, '');
+  
+  // Remove cue settings (VTT)
+  text = text.replace(/position:\d+%.*$/gm, '');
+  
+  // Remove extra whitespace and empty lines
+  text = text.replace(/\s+/g, ' ').trim();
+  
+  return text;
+}
+
+// Get display name for language code
+function getLanguageName(code) {
+  if (!code) return null;
+  const normalized = code.toLowerCase();
+  return LANGUAGE_NAMES[normalized] || LANGUAGE_NAMES[normalized.split('-')[0]] || code.toUpperCase();
+}
+
 (async () => {
   const container = document.getElementById('list-container');
   const stateEmpty = document.getElementById('state-empty');
   const stateLoading = document.getElementById('state-loading');
   const btnClear = document.getElementById('btn-clear');
+  const btnSelectAll = document.getElementById('btn-select-all');
   const toast = document.getElementById('toast');
 
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
@@ -53,10 +163,39 @@
       container.querySelectorAll('.sub-card').forEach(c => c.remove());
       streamItems = {};
       subtitleItems = {};
+      languageCache.clear();
+      updateSelectAllButton();
       showEmpty();
       showToast('Cleared');
     });
   });
+
+  // Select all subtitles functionality
+  btnSelectAll.addEventListener('click', () => {
+    const checkboxes = container.querySelectorAll('.sub-card[data-kind="subtitle"] input[type="checkbox"]');
+    const allChecked = Array.from(checkboxes).every(cb => cb.checked);
+    
+    checkboxes.forEach(cb => {
+      cb.checked = !allChecked;
+    });
+    
+    updateSelectAllButton();
+    showToast(allChecked ? 'All subtitles deselected' : 'All subtitles selected');
+  });
+
+  function updateSelectAllButton() {
+    const checkboxes = container.querySelectorAll('.sub-card[data-kind="subtitle"] input[type="checkbox"]');
+    const subtitleCount = checkboxes.length;
+    
+    if (subtitleCount === 0) {
+      btnSelectAll.style.display = 'none';
+    } else {
+      btnSelectAll.style.display = 'block';
+      const allChecked = Array.from(checkboxes).every(cb => cb.checked);
+      btnSelectAll.textContent = allChecked ? 'Deselect all' : 'Select all';
+      btnSelectAll.classList.toggle('all-selected', allChecked);
+    }
+  }
 
   // ── Render helpers ────────────────────────────────────────
 
@@ -94,14 +233,19 @@
   }
 
   function appendCard(id, item) {
-    if (container.querySelector(`[data-id="${CSS.escape(id)}"]`)) return;
+    // Use URL-based ID to prevent duplicates from same-timestamp items
+    const urlHash = item.url?.slice(-50) || Math.random().toString(36);
+    const uniqueId = `${id}-${urlHash.replace(/[^a-zA-Z0-9]/g, '')}`;
+    
+    if (container.querySelector(`[data-id="${CSS.escape(uniqueId)}"]`)) return;
 
     stateEmpty.style.display = 'none';
     stateLoading.style.display = 'none';
 
     const card = document.createElement('div');
     card.className = 'sub-card';
-    card.dataset.id = id;
+    card.dataset.id = uniqueId;
+    card.dataset.timestamp = item.timestamp;
     card.dataset.kind = item.kind || 'subtitle';
 
     const sizeTxt = formatSize(item.size);
@@ -162,7 +306,7 @@
         </button>` : ''}
       </div>
       ${hasHeaders ? `
-      <div class="headers-panel" id="hp-${escHtml(id)}">
+      <div class="headers-panel" id="hp-${escHtml(uniqueId)}">
 ${buildHeadersText(item.headers)}
       </div>` : ''}
     `;
@@ -178,11 +322,10 @@ ${buildHeadersText(item.headers)}
         const selectedSubs = Array.from(container.querySelectorAll('.sub-card[data-kind="subtitle"] input[type="checkbox"]:checked'))
           .map(cb => {
             const subCard = cb.closest('.sub-card');
-            const subId = subCard?.dataset.id;
-            if (!subId) return null;
+            const timestamp = subCard?.dataset.timestamp;
+            if (!timestamp) return null;
             
-            // Find the subtitle item by matching timestamp in the ID
-            const timestamp = subId.replace('sub-', '');
+            // Find the subtitle item by matching timestamp
             const foundItem = Object.values(subtitleItems).find(s => String(s.timestamp) === timestamp);
             return foundItem || null;
           })
@@ -202,7 +345,7 @@ ${buildHeadersText(item.headers)}
 
     if (hasHeaders) {
       card.querySelector('[data-action="headers"]')?.addEventListener('click', () => {
-        const panel = document.getElementById(`hp-${id}`);
+        const panel = document.getElementById(`hp-${uniqueId}`);
         if (panel) panel.classList.toggle('visible');
       });
 
@@ -223,10 +366,33 @@ ${buildHeadersText(item.headers)}
       checkbox.type = 'checkbox';
       checkbox.style.cssText = 'margin-left: 8px; cursor: pointer;';
       checkbox.title = 'Include in mpv command';
+      checkbox.addEventListener('change', updateSelectAllButton);
       card.querySelector('.card-main').appendChild(checkbox);
+      
+      // Add language detection for subtitles
+      const langBadge = document.createElement('span');
+      langBadge.className = 'badge-language';
+      langBadge.style.cssText = 'background: #28a745; color: #fff; font-size: 9px; font-weight: 600; padding: 2px 5px; border-radius: 4px; margin-left: 6px; text-transform: uppercase; opacity: 0; transition: opacity 0.2s;';
+      langBadge.textContent = '...';
+      card.querySelector('.card-info').appendChild(langBadge);
+      
+      // Detect language asynchronously
+      detectSubtitleLanguage(item.url, item.headers).then(langCode => {
+        if (langCode) {
+          const langName = getLanguageName(langCode);
+          langBadge.textContent = langName || langCode.toUpperCase();
+          langBadge.title = `Detected language: ${langName || langCode}`;
+          langBadge.style.opacity = '1';
+        } else {
+          langBadge.remove();
+        }
+      }).catch(() => {
+        langBadge.remove();
+      });
     }
 
     container.appendChild(card);
+    updateSelectAllButton();
   }
 
   // ── Toast notification ────────────────────────────────────

@@ -314,12 +314,12 @@ chrome.webRequest.onResponseStarted.addListener(
       ...metadata
     };
     
-    const savedItems = await queuedSave(key, requestId, itemData);
+    await queuedSave(key, requestId, itemData);
     
     await updateBadge(tabId);
 
-    // Try to notify popup
-    chrome.runtime.sendMessage({ cmd: 'ITEM_DETECTED', tabId, item: items[requestId] }, () => {
+    // Try to notify popup with the actual item data
+    chrome.runtime.sendMessage({ cmd: 'ITEM_DETECTED', tabId, item: itemData }, () => {
       // Ignore errors (popup may be closed)
       chrome.runtime.lastError;
     });

@@ -38,9 +38,11 @@ This extension solves that by:
 
 - ✅ Detects HLS/m3u8 streams automatically
 - ✅ Captures subtitle files (VTT, SRT, ASS, SSA, TTML, DFXP, etc.)
+- ✅ **Automatic language detection** for subtitles using Chrome's built-in CLD
 - ✅ Stores request headers (Referer, Origin, Cookie, User-Agent, etc.)
 - ✅ Generates mpv command with `--http-header-fields` and `--sub-file` options
 - ✅ Select multiple subtitles to include in one command
+- ✅ **"Select all" button** to quickly select/deselect all subtitles
 - ✅ Badge counter shows detected items per tab
 - ✅ Auto-cleanup on tab close/navigation
 
@@ -117,12 +119,22 @@ Or use IINA's GUI:
 
 | Button | Action |
 |--------|--------|
+| **Select all** | Toggle select/deselect all subtitle checkboxes |
 | **Copy URL** | Copy raw URL to clipboard |
 | **mpv** (stream) | Generate and copy mpv command with headers + selected subtitles |
 | **Download** (subtitle) | Direct download link |
 | **Headers** | Toggle header display panel |
 | **Headers (right-click)** | Copy curl command with headers |
 | **Clear all** | Remove all captured items for current tab |
+
+### Subtitle Language Detection
+
+The extension automatically detects the language of subtitle files by:
+1. Fetching a portion of the subtitle content
+2. Extracting plain text (removing timestamps, tags, formatting)
+3. Using Chrome's built-in Compact Language Detector (CLD)
+
+Detected languages are shown as a green badge on subtitle cards (e.g., "English", "Spanish", "Japanese").
 
 ---
 
