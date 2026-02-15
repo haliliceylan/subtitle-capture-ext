@@ -272,6 +272,17 @@ function getLanguageName(code) {
 
     // Build action buttons based on stream type
     let actionButtons = '';
+    // Format selector HTML (only for HLS/DASH streams with ffmpeg)
+    const formatSelectorHtml = isHlsOrDash ? `
+      <div class="format-selector">
+        <label for="format-select-${uniqueId}">Output:</label>
+        <select id="format-select-${uniqueId}" class="format-select" data-stream-id="${uniqueId}">
+          <option value="mp4" selected>MP4</option>
+          <option value="mkv">MKV</option>
+        </select>
+      </div>
+    ` : '';
+
     if (isHlsOrDash) {
       // HLS/DASH streams: show mpv and ffmpeg buttons
       actionButtons = `
@@ -341,6 +352,7 @@ function getLanguageName(code) {
           Headers
         </button>` : ''}
       </div>
+      ${formatSelectorHtml}
       ${hasHeaders ? `
       <div class="headers-panel" id="hp-${escHtml(uniqueId)}">
 ${buildHeadersText(item.headers)}
@@ -372,8 +384,10 @@ ${buildHeadersText(item.headers)}
       // ffmpeg button handler (only for HLS/DASH streams)
       card.querySelector('[data-action="ffmpeg"]')?.addEventListener('click', () => {
         const selectedSubs = getSelectedSubtitles();
+        const formatSelect = card.querySelector('.format-select');
+        const outputFormat = formatSelect ? formatSelect.value : 'mp4';
 
-        chrome.runtime.sendMessage({ cmd: 'BUILD_FFMPEG', streamItem: item, subtitleItems: selectedSubs }, (response) => {
+        chrome.runtime.sendMessage({ cmd: 'BUILD_FFMPEG', streamItem: item, subtitleItems: selectedSubs, outputFormat }, (response) => {
           if (response?.command) {
             navigator.clipboard.writeText(response.command)
               .then(() => showToast('ffmpeg command copied!'))

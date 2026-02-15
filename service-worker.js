@@ -212,9 +212,12 @@ function buildFfmpegHeaders(headers) {
   return `-headers '${shellEscapeSingle(joined + '\r\n')}'`;
 }
 
-function buildFfmpegCommand(streamItem, subtitleItems = []) {
+function buildFfmpegCommand(streamItem, subtitleItems = [], outputFormat = 'mp4') {
   const streamUrl = streamItem?.url;
   if (!streamUrl) return '';
+  
+  // Validate output format
+  const format = outputFormat === 'mkv' ? 'mkv' : 'mp4';
   
   // Build header option for stream
   const headerOpt = buildFfmpegHeaders(streamItem.headers || {});
@@ -245,13 +248,19 @@ function buildFfmpegCommand(streamItem, subtitleItems = []) {
   // Add output options
   parts.push('-c copy');
   
-  // If we have subtitles, configure subtitle codec for mp4 container
+  // If we have subtitles, configure subtitle codec based on output format
   if (validSubtitles.length > 0) {
-    parts.push('-c:s mov_text');
+    if (format === 'mkv') {
+      // MKV supports copying original subtitle format (better for ASS/SSA styling)
+      parts.push('-c:s copy');
+    } else {
+      // MP4 requires mov_text for subtitle compatibility
+      parts.push('-c:s mov_text');
+    }
   }
   
   // Output filename
-  parts.push('output.mp4');
+  parts.push(`output.${format}`);
   
   return parts.filter(Boolean).join(' ');
 }
@@ -446,8 +455,8 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   }
 
   if (message.cmd === 'BUILD_FFMPEG') {
-    const { streamItem, subtitleItems } = message;
-    sendResponse({ command: buildFfmpegCommand(streamItem, subtitleItems || []) });
+    const { streamItem, subtitleItems, outputFormat } = message;
+    sendResponse({ command: buildFfmpegCommand(streamItem, subtitleItems || [], outputFormat) });
     return true;
   }
 
