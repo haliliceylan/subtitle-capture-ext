@@ -286,11 +286,22 @@ function buildFfmpegCommand(streamItem, subtitleItems = [], outputFormat = 'mp4'
     parts.push(`-i '${shellEscapeSingle(sub.url)}'`);
   });
 
-  // Map all inputs (critical for multiple subtitles)
-  parts.push('-map 0');  // Map all streams from video input
-  validSubtitles.forEach((_, index) => {
-    parts.push(`-map ${index + 1}`);  // Map each subtitle input
-  });
+  // Map streams based on output format
+  if (format === 'mkv') {
+    // For MKV: explicitly map only video and audio streams to avoid data streams
+    // that MKV doesn't support (e.g., timed metadata, ID3, etc.)
+    parts.push('-map 0:v');  // Map video streams from main input
+    parts.push('-map 0:a');  // Map audio streams from main input
+    validSubtitles.forEach((_, index) => {
+      parts.push(`-map ${index + 1}`);  // Map each subtitle input
+    });
+  } else {
+    // For MP4: map all streams from video input
+    parts.push('-map 0');
+    validSubtitles.forEach((_, index) => {
+      parts.push(`-map ${index + 1}`);  // Map each subtitle input
+    });
+  }
 
   // Add output options
   parts.push('-c copy');
@@ -298,9 +309,9 @@ function buildFfmpegCommand(streamItem, subtitleItems = [], outputFormat = 'mp4'
   // If we have subtitles, configure subtitle codec based on output format
   if (validSubtitles.length > 0) {
     if (format === 'mkv') {
-      // MKV supports copying original subtitle format (better for ASS/SSA styling)
-      // Use -c:s srt for text-based subtitles to ensure proper metadata handling
-      parts.push('-c:s srt');
+      // MKV supports various subtitle formats; use 'ass' for wide compatibility
+      // WebVTT cannot be directly muxed as 'srt', so we use 'ass' which MKV supports well
+      parts.push('-c:s ass');
     } else {
       // MP4 requires mov_text for subtitle compatibility
       parts.push('-c:s mov_text');
