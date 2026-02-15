@@ -307,13 +307,12 @@ function initTheme() {
 
   // Helper function to get stream item with variant URL if selected
   function getEffectiveStreamItem(streamId) {
-    const streamItem = streamItems[streamId] || 
-      Object.values(streamItems).find(s => String(s.timestamp) === streamId);
-    
+    // streamId is now the URL
+    const streamItem = Object.values(streamItems).find(s => s.url === streamId);
     if (!streamItem) return null;
     
     // Check if a variant is selected for this stream
-    const selectedVariant = selectedVariants.get(String(streamId));
+    const selectedVariant = selectedVariants.get(streamId);
     if (selectedVariant && selectedVariant.variant) {
       // Return a modified stream item with the variant URL
       return {
@@ -407,7 +406,7 @@ function initTheme() {
       let streamName = streamItem?.name || 'Unknown';
       
       // If a variant is selected, show variant info in command bar
-      const selectedVariant = selectedVariants.get(String(selectedStreamId));
+      const selectedVariant = selectedVariants.get(selectedStreamId);
       if (selectedVariant && selectedVariant.variant) {
         streamName += ` (${selectedVariant.variant.name})`;
       }
@@ -427,11 +426,11 @@ function initTheme() {
     return Array.from(container.querySelectorAll('.sub-card[data-kind="subtitle"] input[type="checkbox"]:checked'))
       .map(cb => {
         const subCard = cb.closest('.sub-card');
-        const timestamp = subCard?.dataset.timestamp;
-        if (!timestamp) return null;
+        const url = subCard?.dataset.subtitleUrl;
+        if (!url) return null;
         
-        // Find the subtitle item by matching timestamp
-        const foundItem = Object.values(subtitleItems).find(s => String(s.timestamp) === timestamp);
+        // Find by URL - guaranteed unique
+        const foundItem = Object.values(subtitleItems).find(s => s.url === url);
         if (!foundItem) return null;
         
         // Include detected language code if available
@@ -550,6 +549,7 @@ function initTheme() {
     card.dataset.id = uniqueId;
     card.dataset.timestamp = timestamp;
     card.dataset.kind = 'stream';
+    card.dataset.streamUrl = item.url;
 
     const sizeTxt = formatSize(item.size);
     const metaParts = [item.format?.toUpperCase()];
@@ -580,7 +580,7 @@ function initTheme() {
     card.innerHTML = `
       <div class="card-main">
         <div class="card-selector">
-          <input type="radio" name="stream-select" value="${timestamp}" data-stream-id="${timestamp}">
+          <input type="radio" name="stream-select" value="${item.url}" data-stream-id="${item.url}">
         </div>
         <span class="badge-format" style="background: #FF6B35">${escHtml(item.format || '?')}</span>
         <div class="card-info">
@@ -627,7 +627,7 @@ function initTheme() {
         
         variantItem.innerHTML = `
           <div class="variant-selector">
-            <input type="radio" name="variant-select-${timestamp}" value="${index}" data-variant-index="${index}">
+            <input type="radio" name="variant-select-${urlHash}" value="${index}" data-variant-index="${index}">
           </div>
           <div class="variant-info">
             <div class="variant-name">${escHtml(variant.name)}</div>
@@ -645,7 +645,7 @@ function initTheme() {
             variantItem.classList.add('selected');
             
             // Store selected variant
-            selectedVariants.set(String(timestamp), {
+            selectedVariants.set(item.url, {
               index: index,
               variant: variant
             });
@@ -679,7 +679,8 @@ function initTheme() {
     const radio = card.querySelector('input[type="radio"][name="stream-select"]');
     radio.addEventListener('change', () => {
       if (radio.checked) {
-        selectedStreamId = String(timestamp);
+        const card = radio.closest('.sub-card');
+        selectedStreamId = card.dataset.streamUrl;  // Use URL as ID
         // Update visual selection
         container.querySelectorAll('.sub-card[data-kind="stream"]').forEach(c => c.classList.remove('selected-stream'));
         card.classList.add('selected-stream');
@@ -822,6 +823,7 @@ function initTheme() {
     card.dataset.id = uniqueId;
     card.dataset.timestamp = timestamp;
     card.dataset.kind = 'subtitle';
+    card.dataset.subtitleUrl = item.url;
 
     const sizeTxt = formatSize(item.size);
     const metaParts = [item.format?.toUpperCase()];
