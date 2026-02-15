@@ -305,12 +305,35 @@ function initTheme() {
     showToast(allChecked ? 'All subtitles deselected' : 'All subtitles selected');
   }
 
+  // Helper function to get stream item with variant URL if selected
+  function getEffectiveStreamItem(streamId) {
+    const streamItem = streamItems[streamId] || 
+      Object.values(streamItems).find(s => String(s.timestamp) === streamId);
+    
+    if (!streamItem) return null;
+    
+    // Check if a variant is selected for this stream
+    const selectedVariant = selectedVariants.get(String(streamId));
+    if (selectedVariant && selectedVariant.variant) {
+      // Return a modified stream item with the variant URL
+      return {
+        ...streamItem,
+        url: selectedVariant.variant.url,
+        variantName: selectedVariant.variant.name,
+        resolution: selectedVariant.variant.resolution || streamItem.resolution,
+        bitrate: selectedVariant.variant.bitrate || streamItem.bitrate,
+        codec: selectedVariant.variant.codec || streamItem.codec
+      };
+    }
+    
+    return streamItem;
+  }
+
   // Command bar MPV button
   btnCommandMpv.addEventListener('click', () => {
     if (!selectedStreamId) return;
     
-    const streamItem = streamItems[selectedStreamId] || 
-      Object.values(streamItems).find(s => String(s.timestamp) === selectedStreamId);
+    const streamItem = getEffectiveStreamItem(selectedStreamId);
     
     if (!streamItem) {
       showToast('Stream not found', true);
@@ -334,8 +357,7 @@ function initTheme() {
   btnCommandFfmpeg.addEventListener('click', () => {
     if (!selectedStreamId) return;
     
-    const streamItem = streamItems[selectedStreamId] || 
-      Object.values(streamItems).find(s => String(s.timestamp) === selectedStreamId);
+    const streamItem = getEffectiveStreamItem(selectedStreamId);
     
     if (!streamItem) {
       showToast('Stream not found', true);
@@ -381,9 +403,14 @@ function initTheme() {
       commandSelection.innerHTML = '<span class="empty">Select a stream to begin</span>';
     } else {
       commandBar.classList.remove('disabled');
-      const streamItem = streamItems[selectedStreamId] || 
-        Object.values(streamItems).find(s => String(s.timestamp) === selectedStreamId);
-      const streamName = streamItem?.name || 'Unknown';
+      const streamItem = getEffectiveStreamItem(selectedStreamId);
+      let streamName = streamItem?.name || 'Unknown';
+      
+      // If a variant is selected, show variant info in command bar
+      const selectedVariant = selectedVariants.get(String(selectedStreamId));
+      if (selectedVariant && selectedVariant.variant) {
+        streamName += ` (${selectedVariant.variant.name})`;
+      }
       
       if (subtitleCount > 0) {
         commandSelection.innerHTML = `Selected: <span class="stream-name">${escHtml(streamName)}</span> + <span class="subtitle-count">${subtitleCount} subtitle${subtitleCount !== 1 ? 's' : ''}</span>`;
@@ -502,6 +529,9 @@ function initTheme() {
       .replace(/"/g, '"');
   }
 
+  // Store selected variant info for each stream
+  const selectedVariants = new Map();
+
   function appendStreamCard(id, item) {
     showSection('streams');
     
@@ -532,6 +562,11 @@ function initTheme() {
     if (item.hdr) metaParts.push('HDR');
     if (item.estimatedQuality) metaParts.push(`~${item.estimatedQuality}`);
     
+    // Add variant count for master playlists
+    if (item.isMasterPlaylist && item.variants) {
+      metaParts.push(`${item.variants.length} quality options`);
+    }
+    
     // Add size and time
     if (sizeTxt) metaParts.push(sizeTxt);
     metaParts.push(timeAgo(item.timestamp));
@@ -558,8 +593,87 @@ function initTheme() {
       </div>
     `;
 
+    // Add variant subitems if this is a master playlist
+    if (item.isMasterPlaylist && item.variants && item.variants.length > 0) {
+      const variantsContainer = document.createElement('div');
+      variantsContainer.className = 'variants-container';
+      
+      const variantsToggle = document.createElement('button');
+      variantsToggle.className = 'variants-toggle';
+      variantsToggle.innerHTML = `
+        <span class="variants-toggle-icon">▼</span>
+        <span>${item.variants.length} qualities</span>
+      `;
+      
+      const variantsList = document.createElement('div');
+      variantsList.className = 'variants-list';
+      
+      // Create variant subitems
+      item.variants.forEach((variant, index) => {
+        const variantItem = document.createElement('div');
+        variantItem.className = 'variant-subitem';
+        variantItem.dataset.variantIndex = index;
+        
+        // Calculate estimated size if we have duration info (we don't have it yet, but structure for future)
+        const estimatedSize = ''; // Could be calculated if duration is available
+        
+        const detailsParts = [];
+        if (variant.resolution) detailsParts.push(`<span class="variant-detail-item">📐 ${variant.resolution}</span>`);
+        if (variant.bitrate) detailsParts.push(`<span class="variant-detail-item">📊 ${variant.bitrate}</span>`);
+        if (variant.codec) detailsParts.push(`<span class="variant-detail-item">🎬 ${variant.codec}</span>`);
+        
+        variantItem.innerHTML = `
+          <div class="variant-selector">
+            <input type="radio" name="variant-select-${timestamp}" value="${index}" data-variant-index="${index}">
+          </div>
+          <div class="variant-info">
+            <div class="variant-name">${escHtml(variant.name)}</div>
+            <div class="variant-details">${detailsParts.join('')}</div>
+          </div>
+          ${estimatedSize ? `<div class="variant-estimated-size">${estimatedSize}</div>` : ''}
+        `;
+        
+        // Variant selection handler
+        const variantRadio = variantItem.querySelector('input[type="radio"]');
+        variantRadio.addEventListener('change', () => {
+          if (variantRadio.checked) {
+            // Update visual selection
+            variantsList.querySelectorAll('.variant-subitem').forEach(v => v.classList.remove('selected'));
+            variantItem.classList.add('selected');
+            
+            // Store selected variant
+            selectedVariants.set(String(timestamp), {
+              index: index,
+              variant: variant
+            });
+            
+            // Also select the parent stream
+            const parentRadio = card.querySelector('input[type="radio"][name="stream-select"]');
+            if (parentRadio && !parentRadio.checked) {
+              parentRadio.checked = true;
+              parentRadio.dispatchEvent(new Event('change'));
+            }
+            
+            updateCommandBar();
+          }
+        });
+        
+        variantsList.appendChild(variantItem);
+      });
+      
+      // Toggle expand/collapse
+      variantsToggle.addEventListener('click', () => {
+        const isExpanded = variantsList.classList.toggle('expanded');
+        variantsToggle.classList.toggle('expanded', isExpanded);
+      });
+      
+      variantsContainer.appendChild(variantsToggle);
+      variantsContainer.appendChild(variantsList);
+      card.appendChild(variantsContainer);
+    }
+
     // Radio button change handler
-    const radio = card.querySelector('input[type="radio"]');
+    const radio = card.querySelector('input[type="radio"][name="stream-select"]');
     radio.addEventListener('change', () => {
       if (radio.checked) {
         selectedStreamId = String(timestamp);

@@ -107,6 +107,195 @@ function sanitizeHeaders(reqHeaders) {
   return headers;
 }
 
+// Resolve relative URL to absolute URL
+function resolveUrl(baseUrl, relativeUrl) {
+  try {
+    return new URL(relativeUrl, baseUrl).href;
+  } catch {
+    return relativeUrl;
+  }
+}
+
+// Format bandwidth (bps) to human-readable string
+function formatBitrate(bps) {
+  if (!bps || bps <= 0) return null;
+  if (bps >= 1000000) {
+    return `${(bps / 1000000).toFixed(1)}Mbps`;
+  } else if (bps >= 1000) {
+    return `${Math.round(bps / 1000)}Kbps`;
+  }
+  return `${bps}bps`;
+}
+
+// Parse codec string to extract video codec
+function parseCodec(codecsString) {
+  if (!codecsString) return null;
+  
+  const codecs = codecsString.split(',').map(c => c.trim().toLowerCase());
+  
+  for (const codec of codecs) {
+    if (codec.includes('hvc1') || codec.includes('hev1') || codec.includes('hevc')) return 'H265';
+    if (codec.includes('avc1') || codec.includes('avc3')) return 'H264';
+    if (codec.includes('vp9') || codec.includes('vp09')) return 'VP9';
+    if (codec.includes('av01')) return 'AV1';
+    if (codec.includes('mp4a')) return 'AAC';
+    if (codec.includes('opus')) return 'Opus';
+    if (codec.includes('mp3') || codec.includes('mp4a.40.34')) return 'MP3';
+  }
+  
+  return null;
+}
+
+// Derive display name for variant
+function deriveVariantName(variant) {
+  const parts = [];
+  if (variant.resolution) parts.push(variant.resolution);
+  if (variant.codec && variant.codec !== 'AAC' && variant.codec !== 'Opus') parts.push(variant.codec);
+  if (variant.bitrate) parts.push(variant.bitrate);
+  
+  if (parts.length === 0) return 'Default';
+  return parts.join(' · ');
+}
+
+// Parse HLS master playlist content (used when content is already fetched)
+function parseHLSMasterPlaylistContent(url, content) {
+  try {
+    const lines = content.split('\n').map(l => l.trim()).filter(l => l);
+
+    // Check if this is a master playlist
+    if (!lines.some(l => l.startsWith('#EXT-X-STREAM-INF'))) {
+      // Not a master playlist (might be a media playlist)
+      return { isMasterPlaylist: false, variants: [] };
+    }
+
+    const variants = [];
+    let currentVariant = null;
+
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+
+      if (line.startsWith('#EXT-X-STREAM-INF')) {
+        // Parse variant attributes
+        currentVariant = {
+          bandwidth: null,
+          resolution: null,
+          codecs: null,
+          frameRate: null,
+          audio: null,
+          video: null,
+          url: null
+        };
+
+        // Extract BANDWIDTH
+        const bandwidthMatch = line.match(/BANDWIDTH=(\d+)/);
+        if (bandwidthMatch) {
+          currentVariant.bandwidth = parseInt(bandwidthMatch[1], 10);
+        }
+
+        // Extract RESOLUTION
+        const resolutionMatch = line.match(/RESOLUTION=(\d+)x(\d+)/);
+        if (resolutionMatch) {
+          const height = parseInt(resolutionMatch[2], 10);
+          currentVariant.resolution = `${height}p`;
+        }
+
+        // Extract CODECS
+        const codecsMatch = line.match(/CODECS="([^"]+)"/);
+        if (codecsMatch) {
+          currentVariant.codecs = codecsMatch[1];
+        }
+
+        // Extract FRAME-RATE
+        const frameRateMatch = line.match(/FRAME-RATE=([\d.]+)/);
+        if (frameRateMatch) {
+          currentVariant.frameRate = parseFloat(frameRateMatch[1]);
+        }
+
+        // Extract AUDIO group
+        const audioMatch = line.match(/AUDIO="([^"]+)"/);
+        if (audioMatch) {
+          currentVariant.audio = audioMatch[1];
+        }
+
+        // Extract VIDEO group
+        const videoMatch = line.match(/VIDEO="([^"]+)"/);
+        if (videoMatch) {
+          currentVariant.video = videoMatch[1];
+        }
+      } else if (currentVariant && !line.startsWith('#') && line.length > 0) {
+        // This is the URL line for the current variant
+        currentVariant.url = resolveUrl(url, line);
+
+        // Process variant data
+        const variant = {
+          url: currentVariant.url,
+          bandwidth: currentVariant.bandwidth,
+          bitrate: formatBitrate(currentVariant.bandwidth),
+          resolution: currentVariant.resolution,
+          codec: parseCodec(currentVariant.codecs),
+          codecs: currentVariant.codecs,
+          frameRate: currentVariant.frameRate
+        };
+
+        variant.name = deriveVariantName(variant);
+        variants.push(variant);
+        currentVariant = null;
+      }
+    }
+
+    return {
+      isMasterPlaylist: true,
+      variants: variants.sort((a, b) => (b.bandwidth || 0) - (a.bandwidth || 0))
+    };
+  } catch (error) {
+    console.warn('Failed to parse HLS master playlist content:', error);
+    return { isMasterPlaylist: false, variants: [], error: error.message };
+  }
+}
+
+// Parse HLS master playlist and extract variant streams (fetches content directly)
+async function parseHLSMasterPlaylist(url, headers = {}) {
+  try {
+    // DEBUG: Log headers being used for fetch
+    console.log('[DEBUG] parseHLSMasterPlaylist called with URL:', url);
+    console.log('[DEBUG] Headers passed to function:', JSON.stringify(headers, null, 2));
+
+    // Fetch the playlist content using the exact same headers from the original request
+    // headers is already sanitized from sanitizeHeaders()
+    const fetchHeaders = new Headers();
+    Object.entries(headers).forEach(([k, v]) => {
+      if (k && v !== undefined) {
+        fetchHeaders.set(k, v);
+      }
+    });
+
+    // DEBUG: Log headers actually being sent
+    const headersSent = {};
+    fetchHeaders.forEach((v, k) => { headersSent[k] = v; });
+    console.log('[DEBUG] Headers being sent in fetch:', JSON.stringify(headersSent, null, 2));
+
+    const response = await fetch(url, {
+      method: 'GET',
+      headers: fetchHeaders,
+      signal: AbortSignal.timeout(5000),
+      referrer: headers.Referer || headers.referer || '',
+      referrerPolicy: 'no-referrer-when-downgrade'
+    });
+
+    console.log('[DEBUG] Fetch response status:', response.status);
+
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}`);
+    }
+
+    const content = await response.text();
+    return parseHLSMasterPlaylistContent(url, content);
+  } catch (error) {
+    console.warn('Failed to parse HLS master playlist:', error);
+    return { isMasterPlaylist: false, variants: [], error: error.message };
+  }
+}
+
 function extractMediaMetadata(url, responseHeaders, format, size, mediaType) {
   const metadata = {};
   
@@ -391,6 +580,18 @@ chrome.webRequest.onBeforeSendHeaders.addListener(
   (details) => {
     // Store headers for response handler
     pendingReqHeaders[details.requestId] = details.requestHeaders || [];
+    
+    // DEBUG: Log captured headers for HLS requests
+    const url = details.url || '';
+    if (url.includes('.m3u8') || url.includes('.m3u')) {
+      console.log('[DEBUG] onBeforeSendHeaders captured for:', url);
+      const headerNames = (details.requestHeaders || []).map(h => h.name);
+      console.log('[DEBUG] Captured header names:', headerNames);
+      const originHeader = (details.requestHeaders || []).find(h => h.name.toLowerCase() === 'origin');
+      const refererHeader = (details.requestHeaders || []).find(h => h.name.toLowerCase() === 'referer');
+      console.log('[DEBUG] Origin header:', originHeader ? originHeader.value : 'NOT PRESENT');
+      console.log('[DEBUG] Referer header:', refererHeader ? refererHeader.value : 'NOT PRESENT');
+    }
   },
   { urls: ['<all_urls>'], types: ['media', 'xmlhttprequest', 'other', 'object'] },
   ['requestHeaders', 'extraHeaders']
@@ -482,6 +683,47 @@ chrome.webRequest.onResponseStarted.addListener(
       mediaType,
       ...metadata
     };
+    
+    // For HLS streams, check if it's a master playlist and parse variants
+    if (mediaType === 'hls') {
+      try {
+        console.log('[DEBUG] About to fetch m3u8 via content script for:', url);
+
+        // Send message to content script in the specific tab to fetch the m3u8
+        // The content script runs in the page context and can use the page's Origin/Referer headers
+        const response = await chrome.tabs.sendMessage(tabId, {
+          action: 'fetchM3U8',
+          url: url
+        });
+
+        console.log('[DEBUG] Content script response:', response);
+
+        if (response && response.success) {
+          // Parse the m3u8 content in the service worker (all heavy logic stays here)
+          const playlistInfo = parseHLSMasterPlaylistContent(url, response.content);
+          if (playlistInfo.isMasterPlaylist && playlistInfo.variants.length > 0) {
+            itemData.isMasterPlaylist = true;
+            itemData.variants = playlistInfo.variants;
+            // Update name to indicate it's a master playlist
+            itemData.name = name.replace(/\.m3u8$/i, '') + ' (Master)';
+          }
+        }
+      } catch (e) {
+        // If content script messaging fails (e.g., content script not loaded yet),
+        // fall back to direct fetch (may fail with 403 on some CDNs)
+        console.warn('Content script fetch failed, trying fallback:', e);
+        try {
+          const playlistInfo = await parseHLSMasterPlaylist(url, headers);
+          if (playlistInfo.isMasterPlaylist && playlistInfo.variants.length > 0) {
+            itemData.isMasterPlaylist = true;
+            itemData.variants = playlistInfo.variants;
+            itemData.name = name.replace(/\.m3u8$/i, '') + ' (Master)';
+          }
+        } catch (fallbackError) {
+          console.warn('Fallback parse also failed:', fallbackError);
+        }
+      }
+    }
     
     await queuedSave(key, requestId, itemData);
     
