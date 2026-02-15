@@ -1,8 +1,8 @@
-# How Subtitles Work with mpv
+# How Subtitles Work with mpv and ffmpeg
 
 ## Quick Answer
 
-**Yes, mpv will automatically load subtitles** when you use the generated command. Here's how:
+**Yes, both mpv and ffmpeg will automatically handle subtitles** when you use the generated commands. Here's how:
 
 ## Method 1: Using `--sub-file` (What This Extension Does)
 
@@ -67,7 +67,44 @@ mpv --http-header-fields='Cookie: session=abc,Referer: https://example.com' \
 
 ---
 
-## Method 4: Embedded Subtitles (HLS Playlists)
+## Method 4: Downloading with ffmpeg
+
+The extension can also generate **ffmpeg commands** for downloading streams with subtitles embedded:
+
+### Example ffmpeg command:
+```bash
+ffmpeg -loglevel error -stats \
+    -headers 'Referer: https://example.com\r\nOrigin: https://example.com\r\nCookie: session=abc123\r\n' \
+    -i 'https://cdn.example.com/stream/master.m3u8' \
+    -i 'https://cdn.example.com/subtitles/english.vtt' \
+    -i 'https://cdn.example.com/subtitles/spanish.srt' \
+    -c copy \
+    -c:s mov_text \
+    output.mp4
+```
+
+### What this does:
+1. `-loglevel error -stats` → Shows minimal output (errors and progress only)
+2. `-headers` → Sends authentication headers with all requests
+3. `-i` → Specifies input URLs (stream + each subtitle)
+4. `-c copy` → Copies video/audio without re-encoding (fast)
+5. `-c:s mov_text` → Embeds subtitles in MP4-compatible format
+6. `output.mp4` → Output filename
+
+### To use:
+1. In extension popup, **check the checkboxes** next to subtitles you want
+2. Click **ffmpeg button** on the stream
+3. Paste command in terminal
+4. Run to download `output.mp4` with embedded subtitles!
+
+### ffmpeg tips:
+- **Change output format**: Use `.mkv` instead of `.mp4` for broader subtitle format support
+- **Include only specific subtitles**: Uncheck unwanted subtitles before clicking ffmpeg
+- **Resume interrupted downloads**: Add `-resume` flag (not all servers support this)
+
+---
+
+## Method 5: Embedded Subtitles (HLS Playlists)
 
 Some m3u8 playlists have subtitles embedded in the manifest:
 
@@ -113,9 +150,20 @@ In this case:
 
 ### Subtitles are out of sync
 
+**In mpv:**
 - Press `z` → delay subtitle (make it appear later)
 - Press `x` → advance subtitle (make it appear earlier)
 - Each press adjusts by 100ms
+
+**In ffmpeg downloaded files:**
+If subtitles are out of sync in the downloaded file, you can adjust during download:
+```bash
+# Delay subtitles by 2 seconds
+ffmpeg -i stream.m3u8 -itsoffset 2 -i subtitle.vtt -c copy -c:s mov_text output.mp4
+
+# Advance subtitles by 1.5 seconds (negative offset)
+ffmpeg -i stream.m3u8 -itsoffset -1.5 -i subtitle.srt -c copy -c:s mov_text output.mp4
+```
 
 ### Multiple subtitle tracks but only one shows
 
@@ -197,9 +245,14 @@ mpv --sub-back-color='#000000' --sub-border-size=2 --sub-file='subtitle.vtt' 'st
 
 ## Summary
 
-✅ **Subtitles ARE automatically loaded** when you use `--sub-file`  
+✅ **Subtitles ARE automatically loaded** when you use `--sub-file` (mpv) or multiple `-i` inputs (ffmpeg)  
 ✅ **Headers are shared** between stream and subtitle requests  
-✅ **Multiple subtitles work** - cycle with `j` key  
-✅ **Works in both mpv and IINA**  
+✅ **Multiple subtitles work** - cycle with `j` key in mpv, or all embedded in ffmpeg downloads  
+✅ **Works in mpv, IINA, and ffmpeg**  
 
-**Just check the subtitle checkboxes in the extension popup before clicking mpv button!**
+**Just check the subtitle checkboxes in the extension popup before clicking mpv or ffmpeg button!**
+
+### When to use each method:
+- **mpv button** → For immediate playback with external player
+- **ffmpeg button** → For downloading with subtitles embedded
+- **Download button** → For direct download of video files (MP4/WebM)

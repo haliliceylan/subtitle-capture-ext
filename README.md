@@ -4,7 +4,7 @@
   <img src="img/icon-128.png" alt="Stream + Subtitle Catcher Logo" width="128" height="128">
 </p>
 
-Chrome extension that captures **HLS/m3u8 streams** and **subtitle files** with their original request headers, then generates **mpv/IINA-ready commands** for external playback.
+Chrome extension that captures **HLS/m3u8 and DASH/MPD streams** and **subtitle files** with their original request headers, then generates **mpv/IINA-ready commands** and **ffmpeg download commands** for external playback.
 
 [![Chrome Web Store](https://img.shields.io/badge/Chrome%20Web%20Store-Coming%20Soon-blue)](https://github.com/haliliceylan/subtitle-capture-ext)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
@@ -36,11 +36,13 @@ This extension solves that by:
 
 ## Features
 
-- ✅ Detects HLS/m3u8 streams automatically
+- ✅ Detects **HLS/m3u8** and **DASH/MPD** streams automatically
 - ✅ Captures subtitle files (VTT, SRT, ASS, SSA, TTML, DFXP, etc.)
 - ✅ **Automatic language detection** for subtitles using Chrome's built-in CLD
 - ✅ Stores request headers (Referer, Origin, Cookie, User-Agent, etc.)
-- ✅ Generates mpv command with `--http-header-fields` and `--sub-file` options
+- ✅ Generates **mpv command** with `--http-header-fields` and `--sub-file` options
+- ✅ Generates **ffmpeg command** for downloading streams with subtitles
+- ✅ **Direct download** button for MP4/WebM video files
 - ✅ Select multiple subtitles to include in one command
 - ✅ **"Select all" button** to quickly select/deselect all subtitles
 - ✅ Badge counter shows detected items per tab
@@ -76,22 +78,32 @@ This extension solves that by:
 3. Extension badge shows count of detected items
 4. Click extension icon to open popup
 
-### 2. Generate mpv Command
+### 2. Generate Playback/Download Commands
 
-**For streams (m3u8):**
-- Click the **mpv** button (orange) on a stream item
+**For HLS/DASH streams (m3u8/mpd):**
+- Click the **mpv** button (orange) to generate a playback command
+- Click the **ffmpeg** button to generate a download command
 - Command is copied to clipboard automatically
 - Paste in terminal and run
 
+**For direct video files (MP4/WebM):**
+- Click the **Download** button to save the file directly
+
 **With subtitles:**
 - Check the checkbox on subtitle items you want to include
-- Click **mpv** button on the stream
-- Generated command includes `--sub-file` for each selected subtitle
+- Click **mpv** or **ffmpeg** button on the stream
+- Generated command includes `--sub-file` (mpv) or additional `-i` inputs (ffmpeg) for each selected subtitle
 
 ### 3. Example Output
 
+**mpv command (for playback):**
 ```bash
 mpv --http-header-fields='Referer: https://example.com,Origin: https://example.com,User-Agent: Mozilla/5.0...,Cookie: session=abc123' --force-window=immediate --sub-file='https://cdn.example.com/subtitles/en.vtt' --sub-file='https://cdn.example.com/subtitles/es.srt' 'https://cdn.example.com/stream/master.m3u8'
+```
+
+**ffmpeg command (for downloading):**
+```bash
+ffmpeg -loglevel error -stats -headers 'Referer: https://example.com\r\nOrigin: https://example.com\r\n' -i 'https://cdn.example.com/stream/master.m3u8' -i 'https://cdn.example.com/subtitles/en.vtt' -i 'https://cdn.example.com/subtitles/es.srt' -c copy -c:s mov_text output.mp4
 ```
 
 ### 4. Use with IINA (macOS)
@@ -121,8 +133,10 @@ Or use IINA's GUI:
 |--------|--------|
 | **Select all** | Toggle select/deselect all subtitle checkboxes |
 | **Copy URL** | Copy raw URL to clipboard |
-| **mpv** (stream) | Generate and copy mpv command with headers + selected subtitles |
-| **Download** (subtitle) | Direct download link |
+| **mpv** (HLS/DASH stream) | Generate and copy mpv command with headers + selected subtitles |
+| **ffmpeg** (HLS/DASH stream) | Generate and copy ffmpeg download command with headers + selected subtitles |
+| **Download** (video file) | Direct download for MP4/WebM files |
+| **Download** (subtitle) | Direct download link for subtitle files |
 | **Headers** | Toggle header display panel |
 | **Headers (right-click)** | Copy curl command with headers |
 | **Clear all** | Remove all captured items for current tab |
@@ -158,8 +172,12 @@ The extension stores these headers (browser-managed headers are excluded):
 ### Detected Formats
 
 **Streams:**
-- m3u8, m3u (HLS playlists)
-- MIME: `application/vnd.apple.mpegurl`, `application/x-mpegurl`
+- **HLS**: m3u8, m3u (HLS playlists)
+  - MIME: `application/vnd.apple.mpegurl`, `application/x-mpegurl`
+- **DASH**: mpd (MPEG-DASH manifests)
+  - MIME: `application/dash+xml`, `application/vnd.mpeg.dash.mpd`
+- **Video files**: mp4, webm, mkv, mov (direct download)
+  - MIME: `video/mp4`, `video/webm`, `video/x-matroska`, etc.
 
 **Subtitles:**
 - vtt, srt, ass, ssa, sub, ttml, dfxp, sbv, stl, lrc, smi
@@ -212,16 +230,18 @@ Read the full [Privacy Policy](PRIVACY.md).
 
 | Feature | FetchV | Stream+Subtitle Catcher |
 |---------|--------|------------------------|
-| Detects m3u8 | ✅ | ✅ |
+| Detects m3u8 (HLS) | ✅ | ✅ |
+| Detects mpd (DASH) | ✅ | ✅ |
 | Detects subtitles | ❌ | ✅ |
-| In-browser download | ✅ | ❌ |
+| In-browser download | ✅ | ✅ (for video files) |
 | mpv command generation | ❌ | ✅ |
+| ffmpeg command generation | ❌ | ✅ |
 | Header capture | ✅ | ✅ |
 | MSE/buffer recording | ✅ | ❌ |
 | External player handoff | ⚠️ (manual) | ✅ (automatic) |
 
 **Use FetchV when:** You want browser-based download/recording  
-**Use this extension when:** You want to play in mpv/IINA with proper headers
+**Use this extension when:** You want to play in mpv/IINA with proper headers or download with ffmpeg
 
 ---
 
