@@ -161,6 +161,16 @@ function shellEscapeSingle(value) {
   return String(value).replace(/'/g, `'\\''`);
 }
 
+function normalizeFilename(title) {
+  if (!title || !title.trim()) return 'output';
+  return title
+    .replace(/[/\\:*?"<>|]/g, '_')  // Replace invalid chars
+    .replace(/\s+/g, ' ')           // Normalize spaces
+    .trim()
+    .replace(/\.$/, '')             // Remove trailing period
+    .substring(0, 100);             // Limit length
+}
+
 function buildMpvHeaderOption(headers) {
   const entries = Object.entries(headers || {});
   if (!entries.length) return '';
@@ -212,56 +222,113 @@ function buildFfmpegHeaders(headers) {
   return `-headers '${shellEscapeSingle(joined + '\r\n')}'`;
 }
 
-function buildFfmpegCommand(streamItem, subtitleItems = [], outputFormat = 'mp4') {
+// Language code mapping for ffmpeg (ISO 639-2 codes where available)
+const LANGUAGE_CODE_MAP = {
+  'en': 'eng', 'es': 'spa', 'fr': 'fre', 'de': 'ger', 'it': 'ita',
+  'pt': 'por', 'ru': 'rus', 'ja': 'jpn', 'ko': 'kor', 'zh': 'chi',
+  'ar': 'ara', 'hi': 'hin', 'tr': 'tur', 'pl': 'pol', 'nl': 'dut',
+  'sv': 'swe', 'da': 'dan', 'no': 'nor', 'fi': 'fin', 'el': 'gre',
+  'he': 'heb', 'th': 'tha', 'vi': 'vie', 'id': 'ind', 'ms': 'may',
+  'cs': 'cze', 'sk': 'slo', 'hu': 'hun', 'ro': 'rum', 'bg': 'bul',
+  'uk': 'ukr', 'hr': 'hrv', 'sr': 'srp', 'sl': 'slv', 'et': 'est',
+  'lv': 'lav', 'lt': 'lit', 'fa': 'per', 'ur': 'urd', 'bn': 'ben',
+  'ta': 'tam', 'te': 'tel', 'ml': 'mal', 'kn': 'kan', 'mr': 'mar',
+  'gu': 'guj', 'pa': 'pan', 'sw': 'swa', 'af': 'afr', 'ca': 'cat',
+  'eu': 'eus', 'gl': 'glg', 'hy': 'hye', 'ka': 'kat', 'mn': 'mon',
+  'ne': 'nep', 'si': 'sin', 'km': 'khm', 'lo': 'lao', 'my': 'mya',
+  'am': 'amh', 'zu': 'zul', 'xh': 'xho', 'yo': 'yor', 'ig': 'ibo',
+  'ha': 'hau', 'tl': 'tgl', 'jv': 'jav', 'su': 'sun', 'mg': 'mlg',
+  'nb': 'nob', 'nn': 'nno', 'zh-cn': 'chi', 'zh-tw': 'chi',
+  'pt-br': 'por', 'pt-pt': 'por', 'es-419': 'spa', 'en-gb': 'eng',
+  'en-us': 'eng'
+};
+
+function getFfmpegLanguageCode(langCode) {
+  if (!langCode) return null;
+  const normalized = langCode.toLowerCase();
+  return LANGUAGE_CODE_MAP[normalized] || LANGUAGE_CODE_MAP[normalized.split('-')[0]] || normalized;
+}
+
+function buildFfmpegCommand(streamItem, subtitleItems = [], outputFormat = 'mp4', outputFilename = null) {
   const streamUrl = streamItem?.url;
   if (!streamUrl) return '';
-  
+
   // Validate output format
   const format = outputFormat === 'mkv' ? 'mkv' : 'mp4';
-  
+
+  // Normalize and use provided filename or default to 'output'
+  const baseFilename = normalizeFilename(outputFilename) || 'output';
+  const finalFilename = `${baseFilename}.${format}`;
+
   // Build header option for stream
   const headerOpt = buildFfmpegHeaders(streamItem.headers || {});
-  
+
   // Filter valid subtitle items
   const validSubtitles = subtitleItems.filter((s) => s?.url);
-  
+
   // Build command parts
   const parts = ['ffmpeg'];
-  
+
   // Add logging and stats flags
   parts.push('-loglevel error');
   parts.push('-stats');
-  
+
   // Add headers (applies to all inputs)
   if (headerOpt) {
     parts.push(headerOpt);
   }
-  
+
   // Add main stream input
   parts.push(`-i '${shellEscapeSingle(streamUrl)}'`);
-  
+
   // Add subtitle inputs
   validSubtitles.forEach((sub) => {
     parts.push(`-i '${shellEscapeSingle(sub.url)}'`);
   });
-  
+
+  // Map all inputs (critical for multiple subtitles)
+  parts.push('-map 0');  // Map all streams from video input
+  validSubtitles.forEach((_, index) => {
+    parts.push(`-map ${index + 1}`);  // Map each subtitle input
+  });
+
   // Add output options
   parts.push('-c copy');
-  
+
   // If we have subtitles, configure subtitle codec based on output format
   if (validSubtitles.length > 0) {
     if (format === 'mkv') {
       // MKV supports copying original subtitle format (better for ASS/SSA styling)
-      parts.push('-c:s copy');
+      // Use -c:s srt for text-based subtitles to ensure proper metadata handling
+      parts.push('-c:s srt');
     } else {
       // MP4 requires mov_text for subtitle compatibility
       parts.push('-c:s mov_text');
     }
   }
-  
+
+  // Add subtitle metadata (language and title) for each subtitle stream
+  validSubtitles.forEach((sub, index) => {
+    const langCode = sub.languageCode || sub.langCode;
+    const langName = sub.languageName || sub.langName;
+    
+    if (langCode) {
+      const ffmpegLangCode = getFfmpegLanguageCode(langCode);
+      parts.push(`-metadata:s:s:${index} language=${shellEscapeSingle(ffmpegLangCode)}`);
+    }
+    
+    if (langName) {
+      parts.push(`-metadata:s:s:${index} title='${shellEscapeSingle(langName)}'`);
+    } else if (langCode) {
+      // Use language code as title if no name provided
+      const ffmpegLangCode = getFfmpegLanguageCode(langCode);
+      parts.push(`-metadata:s:s:${index} title='${shellEscapeSingle(ffmpegLangCode.toUpperCase())}'`);
+    }
+  });
+
   // Output filename
-  parts.push(`output.${format}`);
-  
+  parts.push(`'${shellEscapeSingle(finalFilename)}'`);
+
   return parts.filter(Boolean).join(' ');
 }
 
@@ -455,8 +522,8 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   }
 
   if (message.cmd === 'BUILD_FFMPEG') {
-    const { streamItem, subtitleItems, outputFormat } = message;
-    sendResponse({ command: buildFfmpegCommand(streamItem, subtitleItems || [], outputFormat) });
+    const { streamItem, subtitleItems, outputFormat, outputFilename } = message;
+    sendResponse({ command: buildFfmpegCommand(streamItem, subtitleItems || [], outputFormat, outputFilename) });
     return true;
   }
 

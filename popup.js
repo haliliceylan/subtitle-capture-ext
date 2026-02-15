@@ -26,6 +26,11 @@ const LANGUAGE_NAMES = {
 // Cache for detected languages
 const languageCache = new Map();
 
+// Theme management
+const THEME_KEY = 'subtitle-catcher-theme';
+const THEMES = ['auto', 'light', 'dark'];
+let currentThemeIndex = 0;
+
 // Detect language from subtitle content
 async function detectSubtitleLanguage(url, headers = {}) {
   if (languageCache.has(url)) {
@@ -111,20 +116,89 @@ function getLanguageName(code) {
   return LANGUAGE_NAMES[normalized] || LANGUAGE_NAMES[normalized.split('-')[0]] || code.toUpperCase();
 }
 
+// Theme functions
+function getSystemTheme() {
+  return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+}
+
+function getEffectiveTheme(theme) {
+  if (theme === 'auto') {
+    return getSystemTheme();
+  }
+  return theme;
+}
+
+function applyTheme(theme) {
+  const effectiveTheme = getEffectiveTheme(theme);
+  document.documentElement.setAttribute('data-theme', effectiveTheme);
+  
+  // Update theme toggle button icon
+  const themeBtn = document.getElementById('btn-theme-toggle');
+  if (themeBtn) {
+    if (theme === 'dark' || (theme === 'auto' && effectiveTheme === 'dark')) {
+      themeBtn.textContent = '☀️';
+      themeBtn.title = `Theme: ${theme} (click to cycle)`;
+    } else {
+      themeBtn.textContent = '🌙';
+      themeBtn.title = `Theme: ${theme} (click to cycle)`;
+    }
+  }
+}
+
+function cycleTheme() {
+  currentThemeIndex = (currentThemeIndex + 1) % THEMES.length;
+  const newTheme = THEMES[currentThemeIndex];
+  localStorage.setItem(THEME_KEY, newTheme);
+  applyTheme(newTheme);
+  showToast(`Theme: ${newTheme}`);
+}
+
+function initTheme() {
+  const savedTheme = localStorage.getItem(THEME_KEY) || 'auto';
+  currentThemeIndex = THEMES.indexOf(savedTheme);
+  if (currentThemeIndex === -1) currentThemeIndex = 0;
+  applyTheme(savedTheme);
+  
+  // Listen for system theme changes
+  window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
+    const currentTheme = THEMES[currentThemeIndex];
+    if (currentTheme === 'auto') {
+      applyTheme('auto');
+    }
+  });
+}
+
 (async () => {
   const container = document.getElementById('list-container');
   const stateEmpty = document.getElementById('state-empty');
   const stateLoading = document.getElementById('state-loading');
   const btnClear = document.getElementById('btn-clear');
-  const btnSelectAll = document.getElementById('btn-select-all');
+  const btnThemeToggle = document.getElementById('btn-theme-toggle');
   const toast = document.getElementById('toast');
+  const commandBar = document.getElementById('command-bar');
+  const commandSelection = document.getElementById('command-selection');
+  const btnCommandMpv = document.getElementById('btn-command-mpv');
+  const btnCommandFfmpeg = document.getElementById('btn-command-ffmpeg');
+  const ffmpegFormatSelect = document.getElementById('ffmpeg-format-select');
+
+  // Initialize theme
+  initTheme();
 
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   if (!tab) { showEmpty(); return; }
   const tabId = tab.id;
+  const tabTitle = tab.title || '';
 
   let streamItems = {};
   let subtitleItems = {};
+  let videoFileItems = {};
+  let selectedStreamId = null;
+  let btnSelectAllSection = null;
+
+  // Section containers
+  let streamsSection = null;
+  let subtitlesSection = null;
+  let videoFilesSection = null;
 
   chrome.runtime.sendMessage({ cmd: 'GET_ITEMS', tabId }, (payload) => {
     stateLoading.style.display = 'none';
@@ -139,39 +213,86 @@ function getLanguageName(code) {
       return;
     }
 
-    streamList.sort((a, b) => b.timestamp - a.timestamp).forEach((item) => appendCard(`stream-${item.timestamp}`, item));
-    subList.sort((a, b) => b.timestamp - a.timestamp).forEach((item) => appendCard(`sub-${item.timestamp}`, item));
+    // Separate video files from streams
+    const hlsDashStreams = streamList.filter(item => item.mediaType === 'hls' || item.mediaType === 'dash');
+    const otherStreams = streamList.filter(item => item.mediaType !== 'hls' && item.mediaType !== 'dash' && item.mediaType !== 'video');
+    const videoFiles = streamList.filter(item => item.mediaType === 'video');
+    
+    // Store video files separately
+    videoFiles.forEach(item => videoFileItems[item.timestamp] = item);
+
+    // Create sections
+    createSections();
+
+    // Render items in sections
+    hlsDashStreams.sort((a, b) => b.timestamp - a.timestamp).forEach((item) => appendStreamCard(`stream-${item.timestamp}`, item));
+    otherStreams.sort((a, b) => b.timestamp - a.timestamp).forEach((item) => appendStreamCard(`stream-${item.timestamp}`, item));
+    videoFiles.sort((a, b) => b.timestamp - a.timestamp).forEach((item) => appendVideoFileCard(`video-${item.timestamp}`, item));
+    subList.sort((a, b) => b.timestamp - a.timestamp).forEach((item) => appendSubtitleCard(`sub-${item.timestamp}`, item));
+
+    updateCommandBar();
+    updateSelectAllButton();
   });
 
   chrome.runtime.onMessage.addListener((msg) => {
     if (msg.cmd === 'ITEM_DETECTED' && msg.tabId === tabId) {
       stateEmpty.style.display = 'none';
       
-      // Update internal state so mpv button can find the item
+      // Update internal state
       if (msg.item.kind === 'stream') {
         streamItems[msg.item.timestamp] = msg.item;
+        if (msg.item.mediaType === 'video') {
+          videoFileItems[msg.item.timestamp] = msg.item;
+        }
       } else if (msg.item.kind === 'subtitle') {
         subtitleItems[msg.item.timestamp] = msg.item;
       }
       
-      appendCard(`${msg.item.kind}-${msg.item.timestamp}`, msg.item);
+      // Create sections if they don't exist
+      if (!streamsSection) createSections();
+      
+      // Append to appropriate section
+      if (msg.item.kind === 'stream') {
+        if (msg.item.mediaType === 'video') {
+          appendVideoFileCard(`video-${msg.item.timestamp}`, msg.item);
+        } else {
+          appendStreamCard(`stream-${msg.item.timestamp}`, msg.item);
+        }
+      } else {
+        appendSubtitleCard(`sub-${msg.item.timestamp}`, msg.item);
+      }
+      
+      updateCommandBar();
+      updateSelectAllButton();
     }
   });
 
   btnClear.addEventListener('click', () => {
     chrome.runtime.sendMessage({ cmd: 'CLEAR_ITEMS', tabId }, () => {
       container.querySelectorAll('.sub-card').forEach(c => c.remove());
+      // Remove section headers
+      container.querySelectorAll('.section-header').forEach(h => h.remove());
+      streamsSection = null;
+      subtitlesSection = null;
+      videoFilesSection = null;
       streamItems = {};
       subtitleItems = {};
+      videoFileItems = {};
+      selectedStreamId = null;
+      btnSelectAllSection = null;
       languageCache.clear();
       updateSelectAllButton();
+      updateCommandBar();
       showEmpty();
       showToast('Cleared');
     });
   });
 
-  // Select all subtitles functionality
-  btnSelectAll.addEventListener('click', () => {
+  // Theme toggle button
+  btnThemeToggle.addEventListener('click', cycleTheme);
+
+  // Select all subtitles functionality - now in section header
+  function handleSelectAllClick() {
     const checkboxes = container.querySelectorAll('.sub-card[data-kind="subtitle"] input[type="checkbox"]');
     const allChecked = Array.from(checkboxes).every(cb => cb.checked);
     
@@ -180,24 +301,179 @@ function getLanguageName(code) {
     });
     
     updateSelectAllButton();
+    updateCommandBar();
     showToast(allChecked ? 'All subtitles deselected' : 'All subtitles selected');
+  }
+
+  // Command bar MPV button
+  btnCommandMpv.addEventListener('click', () => {
+    if (!selectedStreamId) return;
+    
+    const streamItem = streamItems[selectedStreamId] || 
+      Object.values(streamItems).find(s => String(s.timestamp) === selectedStreamId);
+    
+    if (!streamItem) {
+      showToast('Stream not found', true);
+      return;
+    }
+    
+    const selectedSubs = getSelectedSubtitles();
+    
+    chrome.runtime.sendMessage({ cmd: 'BUILD_MPV', streamItem, subtitleItems: selectedSubs }, (response) => {
+      if (response?.command) {
+        navigator.clipboard.writeText(response.command)
+          .then(() => showToast('mpv command copied!'))
+          .catch(() => showToast('Copy failed', true));
+      } else {
+        showToast('Failed to build command', true);
+      }
+    });
+  });
+
+  // Command bar FFMPEG button - copies command immediately
+  btnCommandFfmpeg.addEventListener('click', () => {
+    if (!selectedStreamId) return;
+    
+    const streamItem = streamItems[selectedStreamId] || 
+      Object.values(streamItems).find(s => String(s.timestamp) === selectedStreamId);
+    
+    if (!streamItem) {
+      showToast('Stream not found', true);
+      return;
+    }
+    
+    const selectedSubs = getSelectedSubtitles();
+    const outputFormat = ffmpegFormatSelect?.value || 'mp4';
+    
+    chrome.runtime.sendMessage({ cmd: 'BUILD_FFMPEG', streamItem, subtitleItems: selectedSubs, outputFormat, outputFilename: tabTitle }, (response) => {
+      if (response?.command) {
+        navigator.clipboard.writeText(response.command)
+          .then(() => showToast('ffmpeg command copied!'))
+          .catch(() => showToast('Copy failed', true));
+      } else {
+        showToast('Failed to build command', true);
+      }
+    });
   });
 
   function updateSelectAllButton() {
     const checkboxes = container.querySelectorAll('.sub-card[data-kind="subtitle"] input[type="checkbox"]');
     const subtitleCount = checkboxes.length;
     
+    if (!btnSelectAllSection) return;
+    
     if (subtitleCount === 0) {
-      btnSelectAll.style.display = 'none';
+      btnSelectAllSection.style.display = 'none';
     } else {
-      btnSelectAll.style.display = 'block';
+      btnSelectAllSection.style.display = 'block';
       const allChecked = Array.from(checkboxes).every(cb => cb.checked);
-      btnSelectAll.textContent = allChecked ? 'Deselect all' : 'Select all';
-      btnSelectAll.classList.toggle('all-selected', allChecked);
+      btnSelectAllSection.textContent = allChecked ? 'Deselect all' : 'Select all';
+      btnSelectAllSection.classList.toggle('all-selected', allChecked);
     }
   }
 
+  function updateCommandBar() {
+    const selectedSubs = getSelectedSubtitles();
+    const subtitleCount = selectedSubs.length;
+    
+    if (!selectedStreamId) {
+      commandBar.classList.add('disabled');
+      commandSelection.innerHTML = '<span class="empty">Select a stream to begin</span>';
+    } else {
+      commandBar.classList.remove('disabled');
+      const streamItem = streamItems[selectedStreamId] || 
+        Object.values(streamItems).find(s => String(s.timestamp) === selectedStreamId);
+      const streamName = streamItem?.name || 'Unknown';
+      
+      if (subtitleCount > 0) {
+        commandSelection.innerHTML = `Selected: <span class="stream-name">${escHtml(streamName)}</span> + <span class="subtitle-count">${subtitleCount} subtitle${subtitleCount !== 1 ? 's' : ''}</span>`;
+      } else {
+        commandSelection.innerHTML = `Selected: <span class="stream-name">${escHtml(streamName)}</span>`;
+      }
+    }
+  }
+
+  // Store detected language codes for subtitles
+  const subtitleLanguageCache = new Map();
+
+  function getSelectedSubtitles() {
+    return Array.from(container.querySelectorAll('.sub-card[data-kind="subtitle"] input[type="checkbox"]:checked'))
+      .map(cb => {
+        const subCard = cb.closest('.sub-card');
+        const timestamp = subCard?.dataset.timestamp;
+        if (!timestamp) return null;
+        
+        // Find the subtitle item by matching timestamp
+        const foundItem = Object.values(subtitleItems).find(s => String(s.timestamp) === timestamp);
+        if (!foundItem) return null;
+        
+        // Include detected language code if available
+        const langCode = subtitleLanguageCache.get(foundItem.url);
+        if (langCode) {
+          return {
+            ...foundItem,
+            languageCode: langCode,
+            languageName: getLanguageName(langCode)
+          };
+        }
+        
+        return foundItem;
+      })
+      .filter(Boolean);
+  }
+
   // ── Render helpers ────────────────────────────────────────
+
+  function createSections() {
+    // Clear existing sections first
+    container.querySelectorAll('.section-header').forEach(h => h.remove());
+    btnSelectAllSection = null;
+    
+    // Create Streams section
+    streamsSection = document.createElement('div');
+    streamsSection.className = 'section-header';
+    streamsSection.dataset.section = 'streams';
+    streamsSection.innerHTML = '<span class="section-header-icon">📡</span> Streams';
+    streamsSection.style.display = 'none';
+    container.appendChild(streamsSection);
+    
+    // Create Video Files section
+    videoFilesSection = document.createElement('div');
+    videoFilesSection.className = 'section-header';
+    videoFilesSection.dataset.section = 'video-files';
+    videoFilesSection.innerHTML = '<span class="section-header-icon">📼</span> Video Files';
+    videoFilesSection.style.display = 'none';
+    container.appendChild(videoFilesSection);
+    
+    // Create Subtitles section with select all button
+    subtitlesSection = document.createElement('div');
+    subtitlesSection.className = 'section-header';
+    subtitlesSection.dataset.section = 'subtitles';
+    subtitlesSection.style.display = 'none';
+    
+    // Create section header with select all button
+    const headerContent = document.createElement('div');
+    headerContent.className = 'section-header-content';
+    
+    const titleSpan = document.createElement('span');
+    titleSpan.innerHTML = '<span class="section-header-icon">📄</span> Subtitles';
+    
+    btnSelectAllSection = document.createElement('button');
+    btnSelectAllSection.className = 'btn-select-all-section';
+    btnSelectAllSection.textContent = 'Select all';
+    btnSelectAllSection.addEventListener('click', handleSelectAllClick);
+    
+    headerContent.appendChild(titleSpan);
+    headerContent.appendChild(btnSelectAllSection);
+    subtitlesSection.appendChild(headerContent);
+    
+    container.appendChild(subtitlesSection);
+  }
+
+  function showSection(sectionName) {
+    const section = container.querySelector(`.section-header[data-section="${sectionName}"]`);
+    if (section) section.style.display = 'flex';
+  }
 
   function showEmpty() {
     stateLoading.style.display = 'none';
@@ -218,24 +494,21 @@ function getLanguageName(code) {
     return `${Math.round(diff / 3600)}h ago`;
   }
 
-  function buildHeadersText(headers) {
-    return Object.entries(headers)
-      .map(([k, v]) => `<span class="header-key">${escHtml(k)}</span>: <span class="header-val">${escHtml(v)}</span>`)
-      .join('\n');
-  }
-
   function escHtml(str) {
     return String(str)
-      .replace(/&/g, '&amp;')
-      .replace(/</g, '&lt;')
-      .replace(/>/g, '&gt;')
-      .replace(/"/g, '&quot;');
+      .replace(/&/g, '&')
+      .replace(/</g, '<')
+      .replace(/>/g, '>')
+      .replace(/"/g, '"');
   }
 
-  function appendCard(id, item) {
+  function appendStreamCard(id, item) {
+    showSection('streams');
+    
     // Use URL-based ID to prevent duplicates from same-timestamp items
     const urlHash = item.url?.slice(-50) || Math.random().toString(36);
     const uniqueId = `${id}-${urlHash.replace(/[^a-zA-Z0-9]/g, '')}`;
+    const timestamp = item.timestamp;
     
     if (container.querySelector(`[data-id="${CSS.escape(uniqueId)}"]`)) return;
 
@@ -245,8 +518,8 @@ function getLanguageName(code) {
     const card = document.createElement('div');
     card.className = 'sub-card';
     card.dataset.id = uniqueId;
-    card.dataset.timestamp = item.timestamp;
-    card.dataset.kind = item.kind || 'subtitle';
+    card.dataset.timestamp = timestamp;
+    card.dataset.kind = 'stream';
 
     const sizeTxt = formatSize(item.size);
     const metaParts = [item.format?.toUpperCase()];
@@ -264,72 +537,189 @@ function getLanguageName(code) {
     metaParts.push(timeAgo(item.timestamp));
     
     const meta = metaParts.filter(Boolean).join(' · ');
+    const isHlsOrDash = item.mediaType === 'hls' || item.mediaType === 'dash';
 
-    const hasHeaders = item.headers && Object.keys(item.headers).length > 0;
-    const isStream = item.kind === 'stream';
-    const isHlsOrDash = isStream && (item.mediaType === 'hls' || item.mediaType === 'dash');
-    const isVideoFile = isStream && item.mediaType === 'video';
-
-    // Build action buttons based on stream type
-    let actionButtons = '';
-    // Format selector HTML (only for HLS/DASH streams with ffmpeg)
-    const formatSelectorHtml = isHlsOrDash ? `
-      <div class="format-selector">
-        <label for="format-select-${uniqueId}">Output:</label>
-        <select id="format-select-${uniqueId}" class="format-select" data-stream-id="${uniqueId}">
-          <option value="mp4" selected>MP4</option>
-          <option value="mkv">MKV</option>
-        </select>
-      </div>
-    ` : '';
-
-    if (isHlsOrDash) {
-      // HLS/DASH streams: show mpv and ffmpeg buttons
-      actionButtons = `
-        <button class="action-btn btn-download" data-action="mpv" style="background: #FF6B35; border-color: #FF6B35;">
-          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
-            <polygon points="5 3 19 12 5 21 5 3"/>
+    card.innerHTML = `
+      <div class="card-main">
+        <div class="card-selector">
+          <input type="radio" name="stream-select" value="${timestamp}" data-stream-id="${timestamp}">
+        </div>
+        <span class="badge-format" style="background: #FF6B35">${escHtml(item.format || '?')}</span>
+        <div class="card-info">
+          <div class="card-name" title="${escHtml(item.name)}">${escHtml(item.name)}</div>
+          <div class="card-url" title="${escHtml(item.url)}">${escHtml(item.url)}</div>
+          <div class="card-meta">${escHtml(meta)}</div>
+        </div>
+        <button class="action-btn btn-icon" data-action="copy" title="Copy URL">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/>
           </svg>
-          mpv
         </button>
-        <button class="action-btn btn-ffmpeg" data-action="ffmpeg">
-          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
-            <path d="M12 2v20M2 12h20"/>
+      </div>
+    `;
+
+    // Radio button change handler
+    const radio = card.querySelector('input[type="radio"]');
+    radio.addEventListener('change', () => {
+      if (radio.checked) {
+        selectedStreamId = String(timestamp);
+        // Update visual selection
+        container.querySelectorAll('.sub-card[data-kind="stream"]').forEach(c => c.classList.remove('selected-stream'));
+        card.classList.add('selected-stream');
+        updateCommandBar();
+      }
+    });
+
+    // Copy URL button
+    card.querySelector('[data-action="copy"]')?.addEventListener('click', () => {
+      navigator.clipboard.writeText(item.url)
+        .then(() => showToast('URL copied!'))
+        .catch(() => showToast('Copy failed', true));
+    });
+
+    // Insert after streams section header
+    const sectionHeader = container.querySelector('.section-header[data-section="streams"]');
+    if (sectionHeader) {
+      sectionHeader.after(card);
+    } else {
+      container.appendChild(card);
+    }
+  }
+
+  function appendVideoFileCard(id, item) {
+    showSection('video-files');
+    
+    // Use URL-based ID to prevent duplicates from same-timestamp items
+    const urlHash = item.url?.slice(-50) || Math.random().toString(36);
+    const uniqueId = `${id}-${urlHash.replace(/[^a-zA-Z0-9]/g, '')}`;
+    const timestamp = item.timestamp;
+    
+    if (container.querySelector(`[data-id="${CSS.escape(uniqueId)}"]`)) return;
+
+    stateEmpty.style.display = 'none';
+    stateLoading.style.display = 'none';
+
+    const card = document.createElement('div');
+    card.className = 'sub-card';
+    card.dataset.id = uniqueId;
+    card.dataset.timestamp = timestamp;
+    card.dataset.kind = 'video-file';
+
+    const sizeTxt = formatSize(item.size);
+    const metaParts = [item.format?.toUpperCase()];
+    
+    if (item.resolution) metaParts.push(item.resolution);
+    if (item.quality && !item.resolution) metaParts.push(item.quality);
+    
+    if (sizeTxt) metaParts.push(sizeTxt);
+    metaParts.push(timeAgo(item.timestamp));
+    
+    const meta = metaParts.filter(Boolean).join(' · ');
+
+    card.innerHTML = `
+      <div class="card-main">
+        <div class="card-selector">
+          <input type="radio" name="stream-select" value="${timestamp}" data-stream-id="${timestamp}">
+        </div>
+        <span class="badge-format" style="background: #10B981">${escHtml(item.format || 'MP4')}</span>
+        <div class="card-info">
+          <div class="card-name" title="${escHtml(item.name)}">${escHtml(item.name)}</div>
+          <div class="card-url" title="${escHtml(item.url)}">${escHtml(item.url)}</div>
+          <div class="card-meta">${escHtml(meta)}</div>
+        </div>
+        <button class="action-btn btn-icon" data-action="copy" title="Copy URL">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/>
           </svg>
-          ffmpeg
-        </button>`;
-    } else if (isVideoFile) {
-      // Single video files: show direct download button
-      actionButtons = `
+        </button>
+      </div>
+      <div class="card-actions">
         <button class="action-btn btn-direct-download" data-action="direct-download">
           <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
             <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>
           </svg>
           Download
-        </button>`;
-    } else if (isStream) {
-      // Other stream types: just mpv button
-      actionButtons = `
-        <button class="action-btn btn-download" data-action="mpv" style="background: #FF6B35; border-color: #FF6B35;">
-          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
-            <polygon points="5 3 19 12 5 21 5 3"/>
-          </svg>
-          mpv
-        </button>`;
+        </button>
+      </div>
+    `;
+
+    // Radio button change handler
+    const radio = card.querySelector('input[type="radio"]');
+    radio.addEventListener('change', () => {
+      if (radio.checked) {
+        selectedStreamId = String(timestamp);
+        // Update visual selection
+        container.querySelectorAll('.sub-card[data-kind="stream"], .sub-card[data-kind="video-file"]').forEach(c => c.classList.remove('selected-stream'));
+        card.classList.add('selected-stream');
+        updateCommandBar();
+      }
+    });
+
+    // Copy URL button
+    card.querySelector('[data-action="copy"]')?.addEventListener('click', () => {
+      navigator.clipboard.writeText(item.url)
+        .then(() => showToast('URL copied!'))
+        .catch(() => showToast('Copy failed', true));
+    });
+
+    // Direct download handler
+    card.querySelector('[data-action="direct-download"]')?.addEventListener('click', () => {
+      chrome.runtime.sendMessage({ 
+        cmd: 'DOWNLOAD_VIDEO', 
+        url: item.url, 
+        filename: item.name,
+        headers: item.headers || {}
+      }, (response) => {
+        if (response?.success) {
+          showToast('Download started!');
+        } else {
+          showToast('Download failed: ' + (response?.error || 'Unknown error'), true);
+        }
+      });
+    });
+
+    // Insert after video files section header
+    const sectionHeader = container.querySelector('.section-header[data-section="video-files"]');
+    if (sectionHeader) {
+      sectionHeader.after(card);
     } else {
-      // Subtitles: download link
-      actionButtons = `
-        <a class="action-btn btn-download" data-action="download" href="${escHtml(item.url)}" download="${escHtml(item.name)}" target="_blank">
-          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
-            <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>
-          </svg>
-          Download
-        </a>`;
+      container.appendChild(card);
     }
+  }
+
+  function appendSubtitleCard(id, item) {
+    showSection('subtitles');
+    
+    // Use URL-based ID to prevent duplicates from same-timestamp items
+    const urlHash = item.url?.slice(-50) || Math.random().toString(36);
+    const uniqueId = `${id}-${urlHash.replace(/[^a-zA-Z0-9]/g, '')}`;
+    const timestamp = item.timestamp;
+    
+    if (container.querySelector(`[data-id="${CSS.escape(uniqueId)}"]`)) return;
+
+    stateEmpty.style.display = 'none';
+    stateLoading.style.display = 'none';
+
+    const card = document.createElement('div');
+    card.className = 'sub-card';
+    card.dataset.id = uniqueId;
+    card.dataset.timestamp = timestamp;
+    card.dataset.kind = 'subtitle';
+
+    const sizeTxt = formatSize(item.size);
+    const metaParts = [item.format?.toUpperCase()];
+    
+    if (sizeTxt) metaParts.push(sizeTxt);
+    metaParts.push(timeAgo(item.timestamp));
+    
+    const meta = metaParts.filter(Boolean).join(' · ');
 
     card.innerHTML = `
       <div class="card-main">
-        <span class="badge-format" style="background: ${isStream ? '#FF6B35' : '#0077FF'}">${escHtml(item.format || '?')}</span>
+        <div class="card-selector">
+          <input type="checkbox" data-sub-id="${timestamp}">
+        </div>
+        <span class="badge-format" style="background: #0077FF">${escHtml(item.format || '?')}</span>
         <div class="card-info">
           <div class="card-name" title="${escHtml(item.name)}">${escHtml(item.name)}</div>
           <div class="card-url" title="${escHtml(item.url)}">${escHtml(item.url)}</div>
@@ -337,148 +727,53 @@ function getLanguageName(code) {
         </div>
       </div>
       <div class="card-actions">
-        <button class="action-btn btn-copy" data-action="copy">
+        <a class="action-btn btn-download" href="${escHtml(item.url)}" download="${escHtml(item.name)}" target="_blank">
           <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
-            <rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/>
+            <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>
           </svg>
-          Copy URL
-        </button>
-        ${actionButtons}
-        ${hasHeaders ? `
-        <button class="action-btn btn-headers" data-action="headers">
-          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
-            <polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/>
-          </svg>
-          Headers
-        </button>` : ''}
+          Download
+        </a>
       </div>
-      ${formatSelectorHtml}
-      ${hasHeaders ? `
-      <div class="headers-panel" id="hp-${escHtml(uniqueId)}">
-${buildHeadersText(item.headers)}
-      </div>` : ''}
     `;
 
-    card.querySelector('[data-action="copy"]')?.addEventListener('click', () => {
-      navigator.clipboard.writeText(item.url)
-        .then(() => showToast('URL copied!'))
-        .catch(() => showToast('Copy failed', true));
+    // Checkbox change handler
+    const checkbox = card.querySelector('input[type="checkbox"]');
+    checkbox.addEventListener('change', () => {
+      updateSelectAllButton();
+      updateCommandBar();
     });
 
-    if (isStream) {
-      // mpv button handler
-      card.querySelector('[data-action="mpv"]')?.addEventListener('click', () => {
-        const selectedSubs = getSelectedSubtitles();
-
-        chrome.runtime.sendMessage({ cmd: 'BUILD_MPV', streamItem: item, subtitleItems: selectedSubs }, (response) => {
-          if (response?.command) {
-            navigator.clipboard.writeText(response.command)
-              .then(() => showToast('mpv command copied!'))
-              .catch(() => showToast('Copy failed', true));
-          } else {
-            showToast('Failed to build command', true);
-          }
-        });
-      });
-
-      // ffmpeg button handler (only for HLS/DASH streams)
-      card.querySelector('[data-action="ffmpeg"]')?.addEventListener('click', () => {
-        const selectedSubs = getSelectedSubtitles();
-        const formatSelect = card.querySelector('.format-select');
-        const outputFormat = formatSelect ? formatSelect.value : 'mp4';
-
-        chrome.runtime.sendMessage({ cmd: 'BUILD_FFMPEG', streamItem: item, subtitleItems: selectedSubs, outputFormat }, (response) => {
-          if (response?.command) {
-            navigator.clipboard.writeText(response.command)
-              .then(() => showToast('ffmpeg command copied!'))
-              .catch(() => showToast('Copy failed', true));
-          } else {
-            showToast('Failed to build command', true);
-          }
-        });
-      });
-
-      // Direct download handler (only for single video files)
-      card.querySelector('[data-action="direct-download"]')?.addEventListener('click', () => {
-        chrome.runtime.sendMessage({ 
-          cmd: 'DOWNLOAD_VIDEO', 
-          url: item.url, 
-          filename: item.name,
-          headers: item.headers || {}
-        }, (response) => {
-          if (response?.success) {
-            showToast('Download started!');
-          } else {
-            showToast('Download failed: ' + (response?.error || 'Unknown error'), true);
-          }
-        });
-      });
-    }
-
-    // Helper function to get selected subtitles
-    function getSelectedSubtitles() {
-      return Array.from(container.querySelectorAll('.sub-card[data-kind="subtitle"] input[type="checkbox"]:checked'))
-        .map(cb => {
-          const subCard = cb.closest('.sub-card');
-          const timestamp = subCard?.dataset.timestamp;
-          if (!timestamp) return null;
-          
-          // Find the subtitle item by matching timestamp
-          const foundItem = Object.values(subtitleItems).find(s => String(s.timestamp) === timestamp);
-          return foundItem || null;
-        })
-        .filter(Boolean);
-    }
-
-    if (hasHeaders) {
-      card.querySelector('[data-action="headers"]')?.addEventListener('click', () => {
-        const panel = document.getElementById(`hp-${uniqueId}`);
-        if (panel) panel.classList.toggle('visible');
-      });
-
-      card.querySelector('[data-action="headers"]')?.addEventListener('contextmenu', (e) => {
-        e.preventDefault();
-        const curlHeaders = Object.entries(item.headers)
-          .map(([k, v]) => `-H '${k}: ${v.replace(/'/g, "'\\''")}'`)
-          .join(' \\\n  ');
-        const curl = `curl \\\n  ${curlHeaders} \\\n  '${item.url}'`;
-        navigator.clipboard.writeText(curl)
-          .then(() => showToast('curl command copied!'))
-          .catch(() => showToast('Copy failed', true));
-      });
-    }
-
-    if (!isStream) {
-      const checkbox = document.createElement('input');
-      checkbox.type = 'checkbox';
-      checkbox.style.cssText = 'margin-left: 8px; cursor: pointer;';
-      checkbox.title = 'Include in mpv command';
-      checkbox.addEventListener('change', updateSelectAllButton);
-      card.querySelector('.card-main').appendChild(checkbox);
-      
-      // Add language detection for subtitles
-      const langBadge = document.createElement('span');
-      langBadge.className = 'badge-language';
-      langBadge.style.cssText = 'background: #28a745; color: #fff; font-size: 9px; font-weight: 600; padding: 2px 5px; border-radius: 4px; margin-left: 6px; text-transform: uppercase; opacity: 0; transition: opacity 0.2s;';
-      langBadge.textContent = '...';
-      card.querySelector('.card-info').appendChild(langBadge);
-      
-      // Detect language asynchronously
-      detectSubtitleLanguage(item.url, item.headers).then(langCode => {
-        if (langCode) {
-          const langName = getLanguageName(langCode);
-          langBadge.textContent = langName || langCode.toUpperCase();
-          langBadge.title = `Detected language: ${langName || langCode}`;
-          langBadge.style.opacity = '1';
-        } else {
-          langBadge.remove();
-        }
-      }).catch(() => {
+    // Add language detection for subtitles
+    const langBadge = document.createElement('span');
+    langBadge.className = 'badge-language';
+    langBadge.style.cssText = 'background: #28a745; color: #fff; font-size: 9px; font-weight: 600; padding: 2px 5px; border-radius: 4px; margin-left: 6px; text-transform: uppercase; opacity: 0; transition: opacity 0.2s;';
+    langBadge.textContent = '...';
+    card.querySelector('.card-info').appendChild(langBadge);
+    
+    // Detect language asynchronously
+    detectSubtitleLanguage(item.url, item.headers).then(langCode => {
+      if (langCode) {
+        const langName = getLanguageName(langCode);
+        langBadge.textContent = langName || langCode.toUpperCase();
+        langBadge.title = `Detected language: ${langName || langCode}`;
+        langBadge.style.opacity = '1';
+        // Store the detected language code for use when building ffmpeg command
+        subtitleLanguageCache.set(item.url, langCode);
+      } else {
         langBadge.remove();
-      });
-    }
+      }
+    }).catch(() => {
+      langBadge.remove();
+    });
 
-    container.appendChild(card);
+    // Insert after subtitles section header (or at the end if no video files)
+    const sectionHeader = container.querySelector('.section-header[data-section="subtitles"]');
+    if (sectionHeader) {
+      sectionHeader.after(card);
+    } else {
+      container.appendChild(card);
+    }
+    
     updateSelectAllButton();
   }
 
@@ -486,7 +781,7 @@ ${buildHeadersText(item.headers)}
   let toastTimer = null;
   function showToast(msg, isError = false) {
     toast.textContent = msg;
-    toast.style.background = isError ? '#e74c3c' : '#1e1e2e';
+    toast.style.background = isError ? 'var(--bg-toast-error)' : 'var(--bg-toast)';
     toast.classList.add('show');
     if (toastTimer) clearTimeout(toastTimer);
     toastTimer = setTimeout(() => {
