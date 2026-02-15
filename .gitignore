@@ -1,0 +1,12 @@
+# Development files (not needed in extension)
+CWS_LISTING.md
+PUBLISHING.md
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Editor files
+*.swp
+*.swo
+*~

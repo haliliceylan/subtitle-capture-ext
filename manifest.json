@@ -1,0 +1,35 @@
+{
+  "manifest_version": 3,
+  "minimum_chrome_version": "109",
+  "name": "Stream + Subtitle Catcher",
+  "short_name": "StreamCatch",
+  "version": "1.0.0",
+  "description": "Captures HLS/m3u8 streams and subtitle requests with headers, generates mpv/IINA-ready commands.",
+  "homepage_url": "https://github.com/haliliceylan/subtitle-capture-ext",
+  "icons": {
+    "16": "img/icon-16.png",
+    "48": "img/icon-48.png",
+    "128": "img/icon-128.png"
+  },
+  "background": {
+    "service_worker": "service-worker.js"
+  },
+  "action": {
+    "default_icon": {
+      "16": "img/icon-16.png",
+      "48": "img/icon-48.png",
+      "128": "img/icon-128.png"
+    },
+    "default_title": "Stream + Subtitle Catcher",
+    "default_popup": "popup.html"
+  },
+  "permissions": [
+    "tabs",
+    "webRequest",
+    "storage"
+  ],
+  "host_permissions": [
+    "https://*/*",
+    "http://*/*"
+  ]
+}
