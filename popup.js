@@ -267,6 +267,54 @@ function getLanguageName(code) {
 
     const hasHeaders = item.headers && Object.keys(item.headers).length > 0;
     const isStream = item.kind === 'stream';
+    const isHlsOrDash = isStream && (item.mediaType === 'hls' || item.mediaType === 'dash');
+    const isVideoFile = isStream && item.mediaType === 'video';
+
+    // Build action buttons based on stream type
+    let actionButtons = '';
+    if (isHlsOrDash) {
+      // HLS/DASH streams: show mpv and ffmpeg buttons
+      actionButtons = `
+        <button class="action-btn btn-download" data-action="mpv" style="background: #FF6B35; border-color: #FF6B35;">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
+            <polygon points="5 3 19 12 5 21 5 3"/>
+          </svg>
+          mpv
+        </button>
+        <button class="action-btn btn-ffmpeg" data-action="ffmpeg">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
+            <path d="M12 2v20M2 12h20"/>
+          </svg>
+          ffmpeg
+        </button>`;
+    } else if (isVideoFile) {
+      // Single video files: show direct download button
+      actionButtons = `
+        <button class="action-btn btn-direct-download" data-action="direct-download">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
+            <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>
+          </svg>
+          Download
+        </button>`;
+    } else if (isStream) {
+      // Other stream types: just mpv button
+      actionButtons = `
+        <button class="action-btn btn-download" data-action="mpv" style="background: #FF6B35; border-color: #FF6B35;">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
+            <polygon points="5 3 19 12 5 21 5 3"/>
+          </svg>
+          mpv
+        </button>`;
+    } else {
+      // Subtitles: download link
+      actionButtons = `
+        <a class="action-btn btn-download" data-action="download" href="${escHtml(item.url)}" download="${escHtml(item.name)}" target="_blank">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
+            <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>
+          </svg>
+          Download
+        </a>`;
+    }
 
     card.innerHTML = `
       <div class="card-main">
@@ -284,19 +332,7 @@ function getLanguageName(code) {
           </svg>
           Copy URL
         </button>
-        ${isStream ? `
-        <button class="action-btn btn-download" data-action="mpv" style="background: #FF6B35; border-color: #FF6B35;">
-          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
-            <polygon points="5 3 19 12 5 21 5 3"/>
-          </svg>
-          mpv
-        </button>` : `
-        <a class="action-btn btn-download" data-action="download" href="${escHtml(item.url)}" download="${escHtml(item.name)}" target="_blank">
-          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
-            <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>
-          </svg>
-          Download
-        </a>`}
+        ${actionButtons}
         ${hasHeaders ? `
         <button class="action-btn btn-headers" data-action="headers">
           <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
@@ -318,18 +354,9 @@ ${buildHeadersText(item.headers)}
     });
 
     if (isStream) {
+      // mpv button handler
       card.querySelector('[data-action="mpv"]')?.addEventListener('click', () => {
-        const selectedSubs = Array.from(container.querySelectorAll('.sub-card[data-kind="subtitle"] input[type="checkbox"]:checked'))
-          .map(cb => {
-            const subCard = cb.closest('.sub-card');
-            const timestamp = subCard?.dataset.timestamp;
-            if (!timestamp) return null;
-            
-            // Find the subtitle item by matching timestamp
-            const foundItem = Object.values(subtitleItems).find(s => String(s.timestamp) === timestamp);
-            return foundItem || null;
-          })
-          .filter(Boolean);
+        const selectedSubs = getSelectedSubtitles();
 
         chrome.runtime.sendMessage({ cmd: 'BUILD_MPV', streamItem: item, subtitleItems: selectedSubs }, (response) => {
           if (response?.command) {
@@ -341,6 +368,52 @@ ${buildHeadersText(item.headers)}
           }
         });
       });
+
+      // ffmpeg button handler (only for HLS/DASH streams)
+      card.querySelector('[data-action="ffmpeg"]')?.addEventListener('click', () => {
+        const selectedSubs = getSelectedSubtitles();
+
+        chrome.runtime.sendMessage({ cmd: 'BUILD_FFMPEG', streamItem: item, subtitleItems: selectedSubs }, (response) => {
+          if (response?.command) {
+            navigator.clipboard.writeText(response.command)
+              .then(() => showToast('ffmpeg command copied!'))
+              .catch(() => showToast('Copy failed', true));
+          } else {
+            showToast('Failed to build command', true);
+          }
+        });
+      });
+
+      // Direct download handler (only for single video files)
+      card.querySelector('[data-action="direct-download"]')?.addEventListener('click', () => {
+        chrome.runtime.sendMessage({ 
+          cmd: 'DOWNLOAD_VIDEO', 
+          url: item.url, 
+          filename: item.name,
+          headers: item.headers || {}
+        }, (response) => {
+          if (response?.success) {
+            showToast('Download started!');
+          } else {
+            showToast('Download failed: ' + (response?.error || 'Unknown error'), true);
+          }
+        });
+      });
+    }
+
+    // Helper function to get selected subtitles
+    function getSelectedSubtitles() {
+      return Array.from(container.querySelectorAll('.sub-card[data-kind="subtitle"] input[type="checkbox"]:checked'))
+        .map(cb => {
+          const subCard = cb.closest('.sub-card');
+          const timestamp = subCard?.dataset.timestamp;
+          if (!timestamp) return null;
+          
+          // Find the subtitle item by matching timestamp
+          const foundItem = Object.values(subtitleItems).find(s => String(s.timestamp) === timestamp);
+          return foundItem || null;
+        })
+        .filter(Boolean);
     }
 
     if (hasHeaders) {

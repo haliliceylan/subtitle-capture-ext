@@ -25,6 +25,12 @@ const VIDEO_MIME_TYPES = new Set([
 const HLS_EXTENSIONS = new Set(['m3u8', 'm3u']);
 const HLS_MIME_TYPES = new Set(['application/vnd.apple.mpegurl', 'application/x-mpegurl']);
 
+const DASH_EXTENSIONS = new Set(['mpd']);
+const DASH_MIME_TYPES = new Set([
+  'application/dash+xml',
+  'application/vnd.mpeg.dash.mpd'
+]);
+
 const STRIP_HEADERS = new Set([
   'range', 'content-length', 'content-type', 'accept-encoding', 'accept', 'accept-language',
   'upgrade-insecure-requests', 'sec-fetch-dest', 'sec-fetch-mode', 'sec-fetch-site', 'sec-fetch-user',
@@ -198,6 +204,72 @@ function buildMpvCommand(streamItem, subtitleItems = []) {
   ].filter(Boolean).join(' ');
 }
 
+function buildFfmpegHeaders(headers) {
+  const entries = Object.entries(headers || {});
+  if (!entries.length) return '';
+  // Format: 'Header1: value1\r\nHeader2: value2\r\n'
+  const joined = entries.map(([k, v]) => `${k}: ${v}`).join('\r\n');
+  return `-headers '${shellEscapeSingle(joined + '\r\n')}'`;
+}
+
+function buildFfmpegCommand(streamItem, subtitleItems = []) {
+  const streamUrl = streamItem?.url;
+  if (!streamUrl) return '';
+  
+  // Build header option for stream
+  const headerOpt = buildFfmpegHeaders(streamItem.headers || {});
+  
+  // Filter valid subtitle items
+  const validSubtitles = subtitleItems.filter((s) => s?.url);
+  
+  // Build command parts
+  const parts = ['ffmpeg'];
+  
+  // Add headers (applies to all inputs)
+  if (headerOpt) {
+    parts.push(headerOpt);
+  }
+  
+  // Add main stream input
+  parts.push(`-i '${shellEscapeSingle(streamUrl)}'`);
+  
+  // Add subtitle inputs
+  validSubtitles.forEach((sub) => {
+    parts.push(`-i '${shellEscapeSingle(sub.url)}'`);
+  });
+  
+  // Add output options
+  parts.push('-c copy');
+  
+  // If we have subtitles, configure subtitle codec for mp4 container
+  if (validSubtitles.length > 0) {
+    parts.push('-c:s mov_text');
+  }
+  
+  // Output filename
+  parts.push('output.mp4');
+  
+  return parts.filter(Boolean).join(' ');
+}
+
+async function downloadVideo(url, filename, headers = {}) {
+  // Build headers array for chrome.downloads API
+  const headerArray = Object.entries(headers).map(([name, value]) => ({ name, value }));
+  
+  const downloadOptions = {
+    url: url,
+    filename: filename || 'video.mp4',
+    saveAs: false
+  };
+  
+  // Add headers if present
+  if (headerArray.length > 0) {
+    downloadOptions.headers = headerArray;
+  }
+  
+  return chrome.downloads.download(downloadOptions);
+}
+
 async function updateBadge(tabId) {
   const streamKey = `streams_${tabId}`;
   const subKey = `subs_${tabId}`;
@@ -256,7 +328,13 @@ chrome.webRequest.onResponseStarted.addListener(
       format = 'm3u8';
       mediaType = 'hls';
     }
-    // 2. Check for video files (MP4, WebM, etc.)
+    // 2. Check for DASH streams
+    else if (DASH_MIME_TYPES.has(contentType) || (ext && DASH_EXTENSIONS.has(ext))) {
+      kind = 'stream';
+      format = 'mpd';
+      mediaType = 'dash';
+    }
+    // 3. Check for video files (MP4, WebM, etc.)
     else if (VIDEO_MIME_TYPES.has(contentType) || (ext && VIDEO_EXTENSIONS.has(ext))) {
       kind = 'stream';
       format = ext || contentType.split('/')[1] || 'video';
@@ -360,6 +438,20 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message.cmd === 'BUILD_MPV') {
     const { streamItem, subtitleItems } = message;
     sendResponse({ command: buildMpvCommand(streamItem, subtitleItems || []) });
+    return true;
+  }
+
+  if (message.cmd === 'BUILD_FFMPEG') {
+    const { streamItem, subtitleItems } = message;
+    sendResponse({ command: buildFfmpegCommand(streamItem, subtitleItems || []) });
+    return true;
+  }
+
+  if (message.cmd === 'DOWNLOAD_VIDEO') {
+    const { url, filename, headers } = message;
+    downloadVideo(url, filename, headers)
+      .then(downloadId => sendResponse({ success: true, downloadId }))
+      .catch(error => sendResponse({ success: false, error: error.message }));
     return true;
   }
 });
