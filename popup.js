@@ -562,6 +562,9 @@ function initTheme() {
     if (item.hdr) metaParts.push('HDR');
     if (item.estimatedQuality) metaParts.push(`~${item.estimatedQuality}`);
     
+    // Add duration for HLS streams
+    if (item.durationFormatted) metaParts.push(item.durationFormatted);
+    
     // Add variant count for master playlists
     if (item.isMasterPlaylist && item.variants) {
       metaParts.push(`${item.variants.length} quality options`);
@@ -614,8 +617,8 @@ function initTheme() {
         variantItem.className = 'variant-subitem';
         variantItem.dataset.variantIndex = index;
         
-        // Calculate estimated size if we have duration info (we don't have it yet, but structure for future)
-        const estimatedSize = ''; // Could be calculated if duration is available
+        // Use pre-calculated estimated size from service worker
+        const estimatedSize = variant.estimatedSizeFormatted || '';
         
         const detailsParts = [];
         if (variant.resolution) detailsParts.push(`<span class="variant-detail-item">📐 ${variant.resolution}</span>`);
@@ -630,7 +633,7 @@ function initTheme() {
             <div class="variant-name">${escHtml(variant.name)}</div>
             <div class="variant-details">${detailsParts.join('')}</div>
           </div>
-          ${estimatedSize ? `<div class="variant-estimated-size">${estimatedSize}</div>` : ''}
+          ${estimatedSize ? `<div class="variant-estimated-size">${escHtml(estimatedSize)}</div>` : ''}
         `;
         
         // Variant selection handler

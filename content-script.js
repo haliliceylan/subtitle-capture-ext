@@ -10,6 +10,20 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
       .catch(error => sendResponse({ success: false, error: error.message }));
     return true; // Keep channel open for async response
   }
+
+  if (request.action === 'fetchMediaPlaylist') {
+    console.log('[ContentScript] fetchMediaPlaylist action received for:', request.url);
+    fetchM3U8Content(request.url)
+      .then(content => {
+        console.log('[ContentScript] Media playlist fetched successfully, length:', content.length);
+        sendResponse({ success: true, content });
+      })
+      .catch(error => {
+        console.error('[ContentScript] Media playlist fetch failed:', error.message);
+        sendResponse({ success: false, error: error.message });
+      });
+    return true; // Keep channel open for async response
+  }
 });
 
 // Simple fetch function - just gets the content, no parsing

@@ -138,6 +138,88 @@ function formatBitrate(bps) {
   return `${bps}bps`;
 }
 
+// Format size in bytes to human-readable string
+function formatSize(bytes) {
+  if (!bytes || bytes <= 0) return null;
+  if (bytes < 1024) {
+    return `${bytes} B`;
+  } else if (bytes < 1024 * 1024) {
+    return `${(bytes / 1024).toFixed(1)} KB`;
+  } else if (bytes < 1024 * 1024 * 1024) {
+    return `${(bytes / 1024 / 1024).toFixed(2)} MB`;
+  } else {
+    return `${(bytes / 1024 / 1024 / 1024).toFixed(2)} GB`;
+  }
+}
+
+// Format duration in seconds to human-readable string (e.g., "2h 15m" or "45m 30s")
+function formatDuration(seconds) {
+  if (!seconds || seconds <= 0) return null;
+  
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  const secs = Math.floor(seconds % 60);
+  
+  if (hours > 0) {
+    if (minutes > 0) {
+      return `${hours}h ${minutes}m`;
+    }
+    return `${hours}h`;
+  }
+  if (minutes > 0) {
+    if (secs > 0) {
+      return `${minutes}m ${secs}s`;
+    }
+    return `${minutes}m`;
+  }
+  return `${secs}s`;
+}
+
+// Fetch and parse media playlist to calculate total duration
+async function getMediaPlaylistDuration(mediaUrl, tabId) {
+  console.log('[DEBUG] Fetching media playlist duration via content script:', mediaUrl);
+
+  try {
+    // Send message to content script to fetch the media playlist
+    // The content script runs in the page context and can use the page's Origin/Referer headers
+    const response = await chrome.tabs.sendMessage(tabId, {
+      action: 'fetchMediaPlaylist',
+      url: mediaUrl
+    });
+
+    if (!response || !response.success) {
+      console.warn('[DEBUG] Media playlist fetch failed:', response?.error || 'Unknown error');
+      return null;
+    }
+
+    console.log('[DEBUG] Media playlist fetched successfully, parsing duration...');
+
+    const content = response.content;
+    const lines = content.split('\n').map(l => l.trim()).filter(l => l);
+
+    let totalDuration = 0;
+    let segmentCount = 0;
+
+    for (const line of lines) {
+      if (line.startsWith('#EXTINF:')) {
+        // Parse duration from #EXTINF:10.000, or #EXTINF:10,
+        const durationMatch = line.match(/#EXTINF:([\d.]+)/);
+        if (durationMatch) {
+          totalDuration += parseFloat(durationMatch[1]);
+          segmentCount++;
+        }
+      }
+    }
+
+    console.log(`[DEBUG] Parsed media playlist: ${segmentCount} segments, total duration: ${totalDuration}s`);
+
+    return totalDuration > 0 ? totalDuration : null;
+  } catch (error) {
+    console.warn('[DEBUG] Failed to fetch media playlist duration:', error);
+    return null;
+  }
+}
+
 // Parse codec string to extract video codec
 function parseCodec(codecsString) {
   if (!codecsString) return null;
@@ -718,6 +800,35 @@ chrome.webRequest.onResponseStarted.addListener(
             itemData.variants = playlistInfo.variants;
             // Update name to indicate it's a master playlist
             itemData.name = name.replace(/\.m3u8$/i, '') + ' (Master)';
+            
+            // Fetch duration from the first variant (highest quality, already sorted by bandwidth)
+            const firstVariant = playlistInfo.variants[0];
+            if (firstVariant && firstVariant.url) {
+              try {
+                const duration = await getMediaPlaylistDuration(firstVariant.url, tabId);
+                if (duration) {
+                  itemData.duration = duration;
+                  itemData.durationFormatted = formatDuration(duration);
+
+                  // Calculate estimated size for each variant
+                  itemData.variants = playlistInfo.variants.map(variant => {
+                    if (variant.bandwidth && duration) {
+                      const estimatedSizeBytes = (duration * variant.bandwidth) / 8;
+                      variant.estimatedSize = estimatedSizeBytes;
+                      variant.estimatedSizeFormatted = formatSize(estimatedSizeBytes);
+                      console.log(`[DEBUG] Calculated size for variant ${variant.resolution || 'unknown'}: ${variant.estimatedSizeFormatted} (${estimatedSizeBytes} bytes)`);
+                    }
+                    return variant;
+                  });
+
+                  console.log(`[DEBUG] HLS duration: ${duration}s, formatted: ${itemData.durationFormatted}`);
+                } else {
+                  console.warn('[DEBUG] No duration returned from media playlist');
+                }
+              } catch (durationError) {
+                console.warn('Failed to fetch duration for HLS stream:', durationError);
+              }
+            }
           }
         }
       } catch (e) {
@@ -730,6 +841,35 @@ chrome.webRequest.onResponseStarted.addListener(
             itemData.isMasterPlaylist = true;
             itemData.variants = playlistInfo.variants;
             itemData.name = name.replace(/\.m3u8$/i, '') + ' (Master)';
+
+            // Fetch duration from the first variant (highest quality, already sorted by bandwidth)
+            const firstVariant = playlistInfo.variants[0];
+            if (firstVariant && firstVariant.url) {
+              try {
+                const duration = await getMediaPlaylistDuration(firstVariant.url, tabId);
+                if (duration) {
+                  itemData.duration = duration;
+                  itemData.durationFormatted = formatDuration(duration);
+
+                  // Calculate estimated size for each variant
+                  itemData.variants = playlistInfo.variants.map(variant => {
+                    if (variant.bandwidth && duration) {
+                      const estimatedSizeBytes = (duration * variant.bandwidth) / 8;
+                      variant.estimatedSize = estimatedSizeBytes;
+                      variant.estimatedSizeFormatted = formatSize(estimatedSizeBytes);
+                      console.log(`[DEBUG] Calculated size for variant ${variant.resolution || 'unknown'}: ${variant.estimatedSizeFormatted} (${estimatedSizeBytes} bytes)`);
+                    }
+                    return variant;
+                  });
+
+                  console.log(`[DEBUG] HLS duration (fallback): ${duration}s, formatted: ${itemData.durationFormatted}`);
+                } else {
+                  console.warn('[DEBUG] No duration returned from media playlist (fallback)');
+                }
+              } catch (durationError) {
+                console.warn('Failed to fetch duration for HLS stream (fallback):', durationError);
+              }
+            }
           }
         } catch (fallbackError) {
           console.warn('Fallback parse also failed:', fallbackError);
