@@ -225,6 +225,10 @@ function buildFfmpegCommand(streamItem, subtitleItems = []) {
   // Build command parts
   const parts = ['ffmpeg'];
   
+  // Add logging and stats flags
+  parts.push('-loglevel error');
+  parts.push('-stats');
+  
   // Add headers (applies to all inputs)
   if (headerOpt) {
     parts.push(headerOpt);
