@@ -1,0 +1,46 @@
+name: Attach Extension ZIP to Release
+
+on:
+  release:
+    types: [created, published]
+
+jobs:
+  build-and-attach:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.tag_name }}
+
+      - name: Get version from tag
+        id: get_version
+        run: |
+          VERSION=${{ github.event.release.tag_name }}
+          VERSION=${VERSION#v}
+          echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Validate manifest version
+        run: |
+          MANIFEST_VERSION=$(jq -r '.version' subtitle-capture-ext/manifest.json)
+          if [ "$MANIFEST_VERSION" != "${{ steps.get_version.outputs.VERSION }}" ]; then
+            echo "Error: manifest.json version ($MANIFEST_VERSION) doesn't match release tag (${{ steps.get_version.outputs.VERSION }})"
+            exit 1
+          fi
+          echo "✓ Manifest version validated: $MANIFEST_VERSION"
+
+      - name: Create ZIP
+        run: |
+          cd subtitle-capture-ext
+          zip -r ../stream-subtitle-catcher-v${{ steps.get_version.outputs.VERSION }}.zip \
+            manifest.json service-worker.js popup.js popup.html img/
+
+      - name: Upload to release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ github.event.release.tag_name }}
+          files: stream-subtitle-catcher-*.zip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
