@@ -61,6 +61,20 @@ The Extension requires the following permissions:
 
 **What it does:** Saves data to Chrome's local storage API (not synced across devices).
 
+### `downloads`
+**Why:** Required to save video files directly to the user's downloads folder when they click the Download button on MP4/WebM files.
+
+**What it does:** Allows the extension to trigger browser downloads for direct video files.
+
+**What it does NOT do:** Does not automatically download files without user action.
+
+### `scripting`
+**Why:** Required to inject the content script into web pages to fetch m3u8 playlist content with proper page context headers (Origin/Referer).
+
+**What it does:** Injects content-script.js to fetch HLS master playlists and media playlists using the page's natural headers.
+
+**What it does NOT do:** Does not modify page content, inject ads, or track user activity.
+
 ## Data Transmission
 
 **The Extension does NOT:**

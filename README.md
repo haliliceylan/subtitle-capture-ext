@@ -47,6 +47,9 @@ This extension solves that by:
 - ✅ **"Select all" button** to quickly select/deselect all subtitles
 - ✅ Badge counter shows detected items per tab
 - ✅ Auto-cleanup on tab close/navigation
+- ✅ **Theme support** (light/dark/auto) - click the moon/sun icon to cycle themes
+- ✅ **Master playlist support** - parses HLS master playlists to show available variants with resolution, codec, and bitrate
+- ✅ **Duration and size estimation** - calculates total duration and estimated file size for each variant
 
 ---
 
@@ -154,6 +157,13 @@ Detected languages are shown as a green badge on subtitle cards (e.g., "English"
 
 ## Technical Details
 
+### Content Script for Header Handling
+
+The extension injects a **content script** (`content-script.js`) to fetch m3u8 playlists directly from the page context. This approach:
+- Uses the page's natural **Origin** and **Referer** headers
+- Ensures **Cookie** and authentication headers are properly included
+- Is essential for authenticated streams that validate headers on the server
+
 ### Captured Headers
 
 The extension stores these headers (browser-managed headers are excluded):
@@ -168,6 +178,18 @@ The extension stores these headers (browser-managed headers are excluded):
 - `Range`, `Content-Length`, `Content-Type`
 - `Accept-*`, `Cache-Control`, `Pragma`
 - `Sec-Fetch-*`, `Upgrade-Insecure-Requests`
+
+### Master Playlist Parsing
+
+When an **HLS master playlist** is detected, the extension:
+1. Parses the playlist to extract all available variants
+2. Displays each variant with:
+   - **Resolution** (e.g., 1080p, 720p, 480p)
+   - **Codec** (e.g., H264, H265/HEVC)
+   - **Bitrate** (e.g., 5 Mbps, 2 Mbps)
+   - **Estimated file size** (calculated from bitrate × duration)
+3. Allows users to select which variant to use in generated mpv/ffmpeg commands
+4. Fetches the media playlist to calculate **total duration** (formatted as "2h 15m", "45m 30s", etc.)
 
 ### Detected Formats
 
