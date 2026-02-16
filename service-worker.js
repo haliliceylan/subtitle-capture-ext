@@ -37,6 +37,11 @@ const STRIP_HEADERS = new Set([
   'cache-control', 'pragma'
 ]);
 
+// Constants for magic numbers
+const MAX_ITEMS_PER_TAB = 50;
+const FETCH_TIMEOUT_MS = 5000;
+const M3U8_FETCH_TIMEOUT_MS = 10000;
+
 const pendingReqHeaders = {};
 
 // Queue to prevent race conditions when saving items
@@ -58,7 +63,7 @@ async function queuedSave(key, requestId, itemData, url) {
     }
 
     // Check for max items limit
-    if (Object.keys(items).length >= 50) {
+    if (Object.keys(items).length >= MAX_ITEMS_PER_TAB) {
       return null; // Max items reached, skip saving
     }
 
@@ -177,22 +182,18 @@ function formatDuration(seconds) {
 
 // Helper function to ensure content script is ready in a tab
 async function ensureContentScriptReady(tabId) {
-  console.log('[DEBUG] Ensuring content script is ready for tab:', tabId);
-
   try {
     // Try to ping the content script
     const response = await chrome.tabs.sendMessage(tabId, { action: 'ping' });
     if (response && response.success) {
-      console.log('[DEBUG] Content script is already ready');
       return true;
     }
   } catch (error) {
-    console.log('[DEBUG] Content script not ready, will inject:', error.message);
+    // Content script not ready, will inject
   }
 
   // Content script not ready, inject it
   try {
-    console.log('[DEBUG] Injecting content script into tab:', tabId);
     await chrome.scripting.executeScript({
       target: { tabId },
       files: ['content-script.js']
@@ -205,14 +206,13 @@ async function ensureContentScriptReady(tabId) {
     try {
       const response = await chrome.tabs.sendMessage(tabId, { action: 'ping' });
       if (response && response.success) {
-        console.log('[DEBUG] Content script injected and ready');
         return true;
       }
     } catch (verifyError) {
-      console.warn('[DEBUG] Content script injection verification failed:', verifyError.message);
+      console.warn('Content script injection verification failed:', verifyError.message);
     }
   } catch (injectError) {
-    console.warn('[DEBUG] Failed to inject content script:', injectError.message);
+    console.warn('Failed to inject content script:', injectError.message);
   }
 
   return false;
@@ -225,15 +225,12 @@ function delay(ms) {
 
 // Fetch and parse media playlist to calculate total duration
 async function getMediaPlaylistDuration(mediaUrl, tabId, retries = 3) {
-  console.log('[DEBUG] Fetching media playlist duration via content script:', mediaUrl, 'retries:', retries);
-
   let lastError = null;
 
   for (let attempt = 0; attempt < retries; attempt++) {
     if (attempt > 0) {
       // Exponential backoff: 200ms, 400ms, 600ms
       const backoffMs = 200 * attempt;
-      console.log(`[DEBUG] Retry attempt ${attempt + 1}/${retries}, waiting ${backoffMs}ms...`);
       await delay(backoffMs);
     }
 
@@ -241,7 +238,6 @@ async function getMediaPlaylistDuration(mediaUrl, tabId, retries = 3) {
       // Ensure content script is ready before each attempt
       const isReady = await ensureContentScriptReady(tabId);
       if (!isReady) {
-        console.warn('[DEBUG] Content script not ready, skipping attempt');
         lastError = new Error('Content script not ready');
         continue;
       }
@@ -254,18 +250,14 @@ async function getMediaPlaylistDuration(mediaUrl, tabId, retries = 3) {
       });
 
       if (!response || !response.success) {
-        console.warn('[DEBUG] Media playlist fetch failed:', response?.error || 'Unknown error');
         lastError = new Error(response?.error || 'Unknown error');
         continue;
       }
-
-      console.log('[DEBUG] Media playlist fetched successfully, parsing duration...');
 
       const content = response.content;
       const lines = content.split('\n').map(l => l.trim()).filter(l => l);
 
       let totalDuration = 0;
-      let segmentCount = 0;
 
       for (const line of lines) {
         if (line.startsWith('#EXTINF:')) {
@@ -273,21 +265,17 @@ async function getMediaPlaylistDuration(mediaUrl, tabId, retries = 3) {
           const durationMatch = line.match(/#EXTINF:([\d.]+)/);
           if (durationMatch) {
             totalDuration += parseFloat(durationMatch[1]);
-            segmentCount++;
           }
         }
       }
 
-      console.log(`[DEBUG] Parsed media playlist: ${segmentCount} segments, total duration: ${totalDuration}s`);
-
       return totalDuration > 0 ? totalDuration : null;
     } catch (error) {
-      console.warn(`[DEBUG] Attempt ${attempt + 1}/${retries} failed:`, error.message);
       lastError = error;
     }
   }
 
-  console.warn('[DEBUG] All retry attempts exhausted for media playlist duration:', lastError?.message);
+  console.warn('Failed to get media playlist duration after', retries, 'attempts:', lastError?.message);
   return null;
 }
 
@@ -319,6 +307,42 @@ function deriveVariantName(variant) {
   
   if (parts.length === 0) return 'Default';
   return parts.join(' · ');
+}
+
+// Enrich HLS item data with duration and estimated sizes for variants
+async function enrichHlsItemWithDuration(itemData, playlistInfo, tabId) {
+  if (!playlistInfo.isMasterPlaylist || playlistInfo.variants.length === 0) {
+    return itemData;
+  }
+
+  itemData.isMasterPlaylist = true;
+  itemData.variants = playlistInfo.variants;
+  itemData.name = itemData.name.replace(/\.m3u8$/i, '') + ' (Master)';
+
+  // Fetch duration from the first variant (highest quality, already sorted by bandwidth)
+  const firstVariant = playlistInfo.variants[0];
+  if (firstVariant && firstVariant.url) {
+    try {
+      const duration = await getMediaPlaylistDuration(firstVariant.url, tabId);
+      if (duration) {
+        itemData.duration = duration;
+        itemData.durationFormatted = formatDuration(duration);
+
+        // Calculate estimated size for each variant
+        itemData.variants = playlistInfo.variants.map(variant => ({
+          ...variant,
+          ...(variant.bandwidth && duration && {
+            estimatedSize: (duration * variant.bandwidth) / 8,
+            estimatedSizeFormatted: formatSize((duration * variant.bandwidth) / 8)
+          })
+        }));
+      }
+    } catch (durationError) {
+      console.warn('Failed to fetch duration for HLS stream:', durationError);
+    }
+  }
+
+  return itemData;
 }
 
 // Parse HLS master playlist content (used when content is already fetched)
@@ -420,10 +444,6 @@ function parseHLSMasterPlaylistContent(url, content) {
 // Parse HLS master playlist and extract variant streams (fetches content directly)
 async function parseHLSMasterPlaylist(url, headers = {}) {
   try {
-    // DEBUG: Log headers being used for fetch
-    console.log('[DEBUG] parseHLSMasterPlaylist called with URL:', url);
-    console.log('[DEBUG] Headers passed to function:', JSON.stringify(headers, null, 2));
-
     // Fetch the playlist content using the exact same headers from the original request
     // headers is already sanitized from sanitizeHeaders()
     const fetchHeaders = new Headers();
@@ -433,20 +453,13 @@ async function parseHLSMasterPlaylist(url, headers = {}) {
       }
     });
 
-    // DEBUG: Log headers actually being sent
-    const headersSent = {};
-    fetchHeaders.forEach((v, k) => { headersSent[k] = v; });
-    console.log('[DEBUG] Headers being sent in fetch:', JSON.stringify(headersSent, null, 2));
-
     const response = await fetch(url, {
       method: 'GET',
       headers: fetchHeaders,
-      signal: AbortSignal.timeout(5000),
+      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
       referrer: headers.Referer || headers.referer || '',
       referrerPolicy: 'no-referrer-when-downgrade'
     });
-
-    console.log('[DEBUG] Fetch response status:', response.status);
 
     if (!response.ok) {
       throw new Error(`HTTP ${response.status}`);
@@ -575,7 +588,7 @@ function buildFfmpegHeaders(headers) {
   return `-headers '${shellEscapeSingle(joined + '\r\n')}'`;
 }
 
-// Language code mapping for ffmpeg (ISO 639-2 codes where available)
+// Language code mapping for ffmpeg (ISO 639-2 codes where available) - keep in sync with popup.js LANGUAGE_NAMES
 const LANGUAGE_CODE_MAP = {
   'en': 'eng', 'es': 'spa', 'fr': 'fre', 'de': 'ger', 'it': 'ita',
   'pt': 'por', 'ru': 'rus', 'ja': 'jpn', 'ko': 'kor', 'zh': 'chi',
@@ -744,18 +757,6 @@ chrome.webRequest.onBeforeSendHeaders.addListener(
   (details) => {
     // Store headers for response handler
     pendingReqHeaders[details.requestId] = details.requestHeaders || [];
-    
-    // DEBUG: Log captured headers for HLS requests
-    const url = details.url || '';
-    if (url.includes('.m3u8') || url.includes('.m3u')) {
-      console.log('[DEBUG] onBeforeSendHeaders captured for:', url);
-      const headerNames = (details.requestHeaders || []).map(h => h.name);
-      console.log('[DEBUG] Captured header names:', headerNames);
-      const originHeader = (details.requestHeaders || []).find(h => h.name.toLowerCase() === 'origin');
-      const refererHeader = (details.requestHeaders || []).find(h => h.name.toLowerCase() === 'referer');
-      console.log('[DEBUG] Origin header:', originHeader ? originHeader.value : 'NOT PRESENT');
-      console.log('[DEBUG] Referer header:', refererHeader ? refererHeader.value : 'NOT PRESENT');
-    }
   },
   { urls: ['<all_urls>'], types: ['media', 'xmlhttprequest', 'other', 'object'] },
   ['requestHeaders', 'extraHeaders']
@@ -836,7 +837,7 @@ chrome.webRequest.onResponseStarted.addListener(
     if (Object.values(items).some((item) => item.url === url)) {
       return;
     }
-    if (Object.keys(items).length >= 50) {
+    if (Object.keys(items).length >= MAX_ITEMS_PER_TAB) {
       return;
     }
 
@@ -852,12 +853,9 @@ chrome.webRequest.onResponseStarted.addListener(
     // For HLS streams, check if it's a master playlist and parse variants
     if (mediaType === 'hls') {
       try {
-        console.log('[DEBUG] About to fetch m3u8 via content script for:', url);
-
         // Ensure content script is ready before attempting to fetch
         const isReady = await ensureContentScriptReady(tabId);
         if (!isReady) {
-          console.warn('[DEBUG] Content script not ready, skipping HLS master playlist fetch');
           throw new Error('Content script not ready');
         }
 
@@ -868,46 +866,10 @@ chrome.webRequest.onResponseStarted.addListener(
           url: url
         });
 
-        console.log('[DEBUG] Content script response:', response);
-
         if (response && response.success) {
           // Parse the m3u8 content in the service worker (all heavy logic stays here)
           const playlistInfo = parseHLSMasterPlaylistContent(url, response.content);
-          if (playlistInfo.isMasterPlaylist && playlistInfo.variants.length > 0) {
-            itemData.isMasterPlaylist = true;
-            itemData.variants = playlistInfo.variants;
-            // Update name to indicate it's a master playlist
-            itemData.name = name.replace(/\.m3u8$/i, '') + ' (Master)';
-            
-            // Fetch duration from the first variant (highest quality, already sorted by bandwidth)
-            const firstVariant = playlistInfo.variants[0];
-            if (firstVariant && firstVariant.url) {
-              try {
-                const duration = await getMediaPlaylistDuration(firstVariant.url, tabId);
-                if (duration) {
-                  itemData.duration = duration;
-                  itemData.durationFormatted = formatDuration(duration);
-
-                  // Calculate estimated size for each variant
-                  itemData.variants = playlistInfo.variants.map(variant => {
-                    if (variant.bandwidth && duration) {
-                      const estimatedSizeBytes = (duration * variant.bandwidth) / 8;
-                      variant.estimatedSize = estimatedSizeBytes;
-                      variant.estimatedSizeFormatted = formatSize(estimatedSizeBytes);
-                      console.log(`[DEBUG] Calculated size for variant ${variant.resolution || 'unknown'}: ${variant.estimatedSizeFormatted} (${estimatedSizeBytes} bytes)`);
-                    }
-                    return variant;
-                  });
-
-                  console.log(`[DEBUG] HLS duration: ${duration}s, formatted: ${itemData.durationFormatted}`);
-                } else {
-                  console.warn('[DEBUG] No duration returned from media playlist');
-                }
-              } catch (durationError) {
-                console.warn('Failed to fetch duration for HLS stream:', durationError);
-              }
-            }
-          }
+          await enrichHlsItemWithDuration(itemData, playlistInfo, tabId);
         }
       } catch (e) {
         // If content script messaging fails (e.g., content script not loaded yet),
@@ -915,40 +877,7 @@ chrome.webRequest.onResponseStarted.addListener(
         console.warn('Content script fetch failed, trying fallback:', e);
         try {
           const playlistInfo = await parseHLSMasterPlaylist(url, headers);
-          if (playlistInfo.isMasterPlaylist && playlistInfo.variants.length > 0) {
-            itemData.isMasterPlaylist = true;
-            itemData.variants = playlistInfo.variants;
-            itemData.name = name.replace(/\.m3u8$/i, '') + ' (Master)';
-
-            // Fetch duration from the first variant (highest quality, already sorted by bandwidth)
-            const firstVariant = playlistInfo.variants[0];
-            if (firstVariant && firstVariant.url) {
-              try {
-                const duration = await getMediaPlaylistDuration(firstVariant.url, tabId);
-                if (duration) {
-                  itemData.duration = duration;
-                  itemData.durationFormatted = formatDuration(duration);
-
-                  // Calculate estimated size for each variant
-                  itemData.variants = playlistInfo.variants.map(variant => {
-                    if (variant.bandwidth && duration) {
-                      const estimatedSizeBytes = (duration * variant.bandwidth) / 8;
-                      variant.estimatedSize = estimatedSizeBytes;
-                      variant.estimatedSizeFormatted = formatSize(estimatedSizeBytes);
-                      console.log(`[DEBUG] Calculated size for variant ${variant.resolution || 'unknown'}: ${variant.estimatedSizeFormatted} (${estimatedSizeBytes} bytes)`);
-                    }
-                    return variant;
-                  });
-
-                  console.log(`[DEBUG] HLS duration (fallback): ${duration}s, formatted: ${itemData.durationFormatted}`);
-                } else {
-                  console.warn('[DEBUG] No duration returned from media playlist (fallback)');
-                }
-              } catch (durationError) {
-                console.warn('Failed to fetch duration for HLS stream (fallback):', durationError);
-              }
-            }
-          }
+          await enrichHlsItemWithDuration(itemData, playlistInfo, tabId);
         } catch (fallbackError) {
           console.warn('Fallback parse also failed:', fallbackError);
         }

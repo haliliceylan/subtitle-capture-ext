@@ -2,7 +2,7 @@
 // Subtitle Catcher — Popup Script
 // ============================================================
 
-// Language code to name mapping
+// Language code to name mapping - keep in sync with service-worker.js LANGUAGE_CODE_MAP
 const LANGUAGE_NAMES = {
   'en': 'English', 'es': 'Spanish', 'fr': 'French', 'de': 'German', 'it': 'Italian',
   'pt': 'Portuguese', 'ru': 'Russian', 'ja': 'Japanese', 'ko': 'Korean', 'zh': 'Chinese',
@@ -201,6 +201,12 @@ function initTheme() {
   let videoFilesSection = null;
 
   chrome.runtime.sendMessage({ cmd: 'GET_ITEMS', tabId }, (payload) => {
+    if (chrome.runtime.lastError) {
+      console.error('Failed to get items:', chrome.runtime.lastError.message);
+      showToast('Failed to load items', true);
+      stateLoading.style.display = 'none';
+      return;
+    }
     stateLoading.style.display = 'none';
     streamItems = payload?.streams || {};
     subtitleItems = payload?.subtitles || {};
@@ -269,6 +275,11 @@ function initTheme() {
 
   btnClear.addEventListener('click', () => {
     chrome.runtime.sendMessage({ cmd: 'CLEAR_ITEMS', tabId }, () => {
+      if (chrome.runtime.lastError) {
+        console.error('Failed to clear items:', chrome.runtime.lastError.message);
+        showToast('Failed to clear items', true);
+        return;
+      }
       container.querySelectorAll('.sub-card').forEach(c => c.remove());
       // Remove section headers
       container.querySelectorAll('.section-header').forEach(h => h.remove());
@@ -342,6 +353,11 @@ function initTheme() {
     const selectedSubs = getSelectedSubtitles();
     
     chrome.runtime.sendMessage({ cmd: 'BUILD_MPV', streamItem, subtitleItems: selectedSubs }, (response) => {
+      if (chrome.runtime.lastError) {
+        console.error('Failed to build mpv command:', chrome.runtime.lastError.message);
+        showToast('Failed to build mpv command', true);
+        return;
+      }
       if (response?.command) {
         navigator.clipboard.writeText(response.command)
           .then(() => showToast('mpv command copied!'))
@@ -367,6 +383,11 @@ function initTheme() {
     const outputFormat = ffmpegFormatSelect?.value || 'mp4';
     
     chrome.runtime.sendMessage({ cmd: 'BUILD_FFMPEG', streamItem, subtitleItems: selectedSubs, outputFormat, outputFilename: tabTitle }, (response) => {
+      if (chrome.runtime.lastError) {
+        console.error('Failed to build ffmpeg command:', chrome.runtime.lastError.message);
+        showToast('Failed to build ffmpeg command', true);
+        return;
+      }
       if (response?.command) {
         navigator.clipboard.writeText(response.command)
           .then(() => showToast('ffmpeg command copied!'))
@@ -507,10 +528,11 @@ function initTheme() {
   }
 
   function formatSize(bytes) {
-    if (!bytes) return '';
-    if (bytes < 1024) return bytes + ' B';
-    if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
-    return (bytes / 1024 / 1024).toFixed(2) + ' MB';
+    if (!bytes || bytes <= 0) return '';
+    if (bytes < 1024) return `${bytes} B`;
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+    if (bytes < 1024 * 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(2)} MB`;
+    return `${(bytes / 1024 / 1024 / 1024).toFixed(2)} GB`;
   }
 
   function timeAgo(ts) {
@@ -522,38 +544,188 @@ function initTheme() {
 
   function escHtml(str) {
     return String(str)
-      .replace(/&/g, '&')
-      .replace(/</g, '<')
-      .replace(/>/g, '>')
-      .replace(/"/g, '"');
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
   }
 
   // Store selected variant info for each stream
   const selectedVariants = new Map();
 
-  function appendStreamCard(id, item) {
-    showSection('streams');
-    
-    // Use URL-based ID to prevent duplicates from same-timestamp items
-    const urlHash = item.url?.slice(-50) || Math.random().toString(36);
-    const uniqueId = `${id}-${urlHash.replace(/[^a-zA-Z0-9]/g, '')}`;
-    const timestamp = item.timestamp;
-    
-    if (container.querySelector(`[data-id="${CSS.escape(uniqueId)}"]`)) return;
+  // ── Card Creation Helpers ─────────────────────────────────
 
-    stateEmpty.style.display = 'none';
-    stateLoading.style.display = 'none';
+  /**
+   * Generates a unique ID from id and URL
+   * @param {string} id - Base ID
+   * @param {string} url - URL to hash
+   * @returns {string} Unique ID
+   */
+  function generateUniqueId(id, url) {
+    const urlHash = url?.slice(-50) || Math.random().toString(36);
+    return `${id}-${urlHash.replace(/[^a-zA-Z0-9]/g, '')}`;
+  }
 
+  /**
+   * Checks if a card with the given ID already exists
+   * @param {string} uniqueId - Unique ID to check
+   * @returns {boolean} True if duplicate exists
+   */
+  function checkDuplicate(uniqueId) {
+    return !!container.querySelector(`[data-id="${CSS.escape(uniqueId)}"]`);
+  }
+
+  /**
+   * Creates a base card element with common properties
+   * @param {string} uniqueId - Unique ID for the card
+   * @param {number} timestamp - Timestamp for the card
+   * @param {string} kind - Kind of card (stream, video-file, subtitle)
+   * @returns {HTMLElement} The created card element
+   */
+  function createBaseCard(uniqueId, timestamp, kind) {
     const card = document.createElement('div');
     card.className = 'sub-card';
     card.dataset.id = uniqueId;
     card.dataset.timestamp = timestamp;
-    card.dataset.kind = 'stream';
+    card.dataset.kind = kind;
+    return card;
+  }
+
+  /**
+   * Shows the card container and hides empty/loading states
+   */
+  function showCardContainer() {
+    stateEmpty.style.display = 'none';
+    stateLoading.style.display = 'none';
+  }
+
+  /**
+   * Inserts a card after its section header
+   * @param {HTMLElement} card - The card to insert
+   * @param {string} sectionName - Name of the section (streams, video-files, subtitles)
+   */
+  function insertCardAfterSection(card, sectionName) {
+    const sectionHeader = container.querySelector(`.section-header[data-section="${sectionName}"]`);
+    if (sectionHeader) {
+      sectionHeader.after(card);
+    } else {
+      container.appendChild(card);
+    }
+  }
+
+  /**
+   * Builds the card-main inner HTML for stream and video file cards
+   * @param {Object} item - The item data
+   * @param {string} meta - Formatted meta string
+   * @param {string} badgeColor - Badge background color
+   * @param {string} inputType - Type of input (radio or checkbox)
+   * @param {string} inputName - Name attribute for radio inputs
+   * @param {string} inputValue - Value attribute for the input
+   * @param {string} inputDataAttr - Data attribute name for the input
+   * @param {boolean} showCopyButton - Whether to show the copy button
+   * @returns {string} HTML string for card-main
+   */
+  function buildCardMainHtml(item, meta, badgeColor, inputType, inputName, inputValue, inputDataAttr, showCopyButton) {
+    const inputNameAttr = inputName ? ` name="${inputName}"` : '';
+    const copyButton = showCopyButton ? `
+        <button class="action-btn btn-icon" data-action="copy" title="Copy URL">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/>
+          </svg>
+        </button>
+      ` : '';
+
+    return `
+      <div class="card-main">
+        <div class="card-selector">
+          <input type="${inputType}"${inputNameAttr} value="${inputValue}" ${inputDataAttr}="${inputValue}">
+        </div>
+        <span class="badge-format" style="background: ${badgeColor}">${escHtml(item.format || '?')}</span>
+        <div class="card-info">
+          <div class="card-name" title="${escHtml(item.name)}">${escHtml(item.name)}</div>
+          <div class="card-url" title="${escHtml(item.url)}">${escHtml(item.url)}</div>
+          <div class="card-meta">${escHtml(meta)}</div>
+        </div>
+        ${copyButton}
+      </div>
+    `;
+  }
+
+  /**
+   * Attaches common event handlers to a card
+   * @param {HTMLElement} card - The card element
+   * @param {Object} item - The item data
+   * @param {Object} options - Event handler options
+   */
+  function attachCardEventHandlers(card, item, options = {}) {
+    // Copy URL button handler
+    if (options.showCopyButton) {
+      card.querySelector('[data-action="copy"]')?.addEventListener('click', () => {
+        navigator.clipboard.writeText(item.url)
+          .then(() => showToast('URL copied!'))
+          .catch(() => showToast('Copy failed', true));
+      });
+    }
+
+    // Radio button change handler for stream/video-file cards
+    if (options.onRadioChange) {
+      const radio = card.querySelector('input[type="radio"]');
+      radio?.addEventListener('change', () => {
+        if (radio.checked) {
+          options.onRadioChange(card, radio);
+        }
+      });
+    }
+
+    // Checkbox change handler for subtitle cards
+    if (options.onCheckboxChange) {
+      const checkbox = card.querySelector('input[type="checkbox"]');
+      checkbox?.addEventListener('change', () => {
+        options.onCheckboxChange();
+      });
+    }
+
+    // Direct download handler for video files
+    if (options.onDirectDownload) {
+      card.querySelector('[data-action="direct-download"]')?.addEventListener('click', () => {
+        chrome.runtime.sendMessage({
+          cmd: 'DOWNLOAD_VIDEO',
+          url: item.url,
+          filename: item.name,
+          headers: item.headers || {}
+        }, (response) => {
+          if (chrome.runtime.lastError) {
+            console.error('Failed to download video:', chrome.runtime.lastError.message);
+            showToast('Failed to start download', true);
+            return;
+          }
+          if (response?.success) {
+            showToast('Download started!');
+          } else {
+            showToast('Download failed: ' + (response?.error || 'Unknown error'), true);
+          }
+        });
+      });
+    }
+  }
+
+  function appendStreamCard(id, item) {
+    showSection('streams');
+
+    const uniqueId = generateUniqueId(id, item.url);
+    const timestamp = item.timestamp;
+    const urlHash = item.url?.slice(-50) || Math.random().toString(36);
+
+    if (checkDuplicate(uniqueId)) return;
+
+    showCardContainer();
+
+    const card = createBaseCard(uniqueId, timestamp, 'stream');
     card.dataset.streamUrl = item.url;
 
     const sizeTxt = formatSize(item.size);
     const metaParts = [item.format?.toUpperCase()];
-    
+
     // Add resolution/quality for streams
     if (item.resolution) metaParts.push(item.resolution);
     if (item.quality && !item.resolution) metaParts.push(item.quality);
@@ -561,40 +733,22 @@ function initTheme() {
     if (item.bitrate) metaParts.push(item.bitrate);
     if (item.hdr) metaParts.push('HDR');
     if (item.estimatedQuality) metaParts.push(`~${item.estimatedQuality}`);
-    
+
     // Add duration for HLS streams
     if (item.durationFormatted) metaParts.push(item.durationFormatted);
-    
+
     // Add variant count for master playlists
     if (item.isMasterPlaylist && item.variants) {
       metaParts.push(`${item.variants.length} quality options`);
     }
-    
+
     // Add size and time
     if (sizeTxt) metaParts.push(sizeTxt);
     metaParts.push(timeAgo(item.timestamp));
-    
-    const meta = metaParts.filter(Boolean).join(' · ');
-    const isHlsOrDash = item.mediaType === 'hls' || item.mediaType === 'dash';
 
-    card.innerHTML = `
-      <div class="card-main">
-        <div class="card-selector">
-          <input type="radio" name="stream-select" value="${item.url}" data-stream-id="${item.url}">
-        </div>
-        <span class="badge-format" style="background: #FF6B35">${escHtml(item.format || '?')}</span>
-        <div class="card-info">
-          <div class="card-name" title="${escHtml(item.name)}">${escHtml(item.name)}</div>
-          <div class="card-url" title="${escHtml(item.url)}">${escHtml(item.url)}</div>
-          <div class="card-meta">${escHtml(meta)}</div>
-        </div>
-        <button class="action-btn btn-icon" data-action="copy" title="Copy URL">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/>
-          </svg>
-        </button>
-      </div>
-    `;
+    const meta = metaParts.filter(Boolean).join(' · ');
+
+    card.innerHTML = buildCardMainHtml(item, meta, '#FF6B35', 'radio', 'stream-select', item.url, 'data-stream-id', true);
 
     // Add variant subitems if this is a master playlist
     if (item.isMasterPlaylist && item.variants && item.variants.length > 0) {
@@ -675,82 +829,45 @@ function initTheme() {
       card.appendChild(variantsContainer);
     }
 
-    // Radio button change handler
-    const radio = card.querySelector('input[type="radio"][name="stream-select"]');
-    radio.addEventListener('change', () => {
-      if (radio.checked) {
-        const card = radio.closest('.sub-card');
-        selectedStreamId = card.dataset.streamUrl;  // Use URL as ID
+    // Attach event handlers
+    attachCardEventHandlers(card, item, {
+      showCopyButton: true,
+      onRadioChange: (cardEl, radioEl) => {
+        selectedStreamId = cardEl.dataset.streamUrl;
         // Update visual selection
         container.querySelectorAll('.sub-card[data-kind="stream"]').forEach(c => c.classList.remove('selected-stream'));
-        card.classList.add('selected-stream');
+        cardEl.classList.add('selected-stream');
         updateCommandBar();
       }
     });
 
-    // Copy URL button
-    card.querySelector('[data-action="copy"]')?.addEventListener('click', () => {
-      navigator.clipboard.writeText(item.url)
-        .then(() => showToast('URL copied!'))
-        .catch(() => showToast('Copy failed', true));
-    });
-
-    // Insert after streams section header
-    const sectionHeader = container.querySelector('.section-header[data-section="streams"]');
-    if (sectionHeader) {
-      sectionHeader.after(card);
-    } else {
-      container.appendChild(card);
-    }
+    insertCardAfterSection(card, 'streams');
   }
 
   function appendVideoFileCard(id, item) {
     showSection('video-files');
-    
-    // Use URL-based ID to prevent duplicates from same-timestamp items
-    const urlHash = item.url?.slice(-50) || Math.random().toString(36);
-    const uniqueId = `${id}-${urlHash.replace(/[^a-zA-Z0-9]/g, '')}`;
+
+    const uniqueId = generateUniqueId(id, item.url);
     const timestamp = item.timestamp;
-    
-    if (container.querySelector(`[data-id="${CSS.escape(uniqueId)}"]`)) return;
 
-    stateEmpty.style.display = 'none';
-    stateLoading.style.display = 'none';
+    if (checkDuplicate(uniqueId)) return;
 
-    const card = document.createElement('div');
-    card.className = 'sub-card';
-    card.dataset.id = uniqueId;
-    card.dataset.timestamp = timestamp;
-    card.dataset.kind = 'video-file';
+    showCardContainer();
+
+    const card = createBaseCard(uniqueId, timestamp, 'video-file');
 
     const sizeTxt = formatSize(item.size);
     const metaParts = [item.format?.toUpperCase()];
-    
+
     if (item.resolution) metaParts.push(item.resolution);
     if (item.quality && !item.resolution) metaParts.push(item.quality);
-    
+
     if (sizeTxt) metaParts.push(sizeTxt);
     metaParts.push(timeAgo(item.timestamp));
-    
+
     const meta = metaParts.filter(Boolean).join(' · ');
 
-    card.innerHTML = `
-      <div class="card-main">
-        <div class="card-selector">
-          <input type="radio" name="stream-select" value="${timestamp}" data-stream-id="${timestamp}">
-        </div>
-        <span class="badge-format" style="background: #10B981">${escHtml(item.format || 'MP4')}</span>
-        <div class="card-info">
-          <div class="card-name" title="${escHtml(item.name)}">${escHtml(item.name)}</div>
-          <div class="card-url" title="${escHtml(item.url)}">${escHtml(item.url)}</div>
-          <div class="card-meta">${escHtml(meta)}</div>
-        </div>
-        <button class="action-btn btn-icon" data-action="copy" title="Copy URL">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/>
-          </svg>
-        </button>
-      </div>
+    card.innerHTML = buildCardMainHtml(item, meta, '#10B981', 'radio', 'stream-select', timestamp, 'data-stream-id', true) + `
       <div class="card-actions">
         <button class="action-btn btn-direct-download" data-action="direct-download">
           <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
@@ -761,90 +878,44 @@ function initTheme() {
       </div>
     `;
 
-    // Radio button change handler
-    const radio = card.querySelector('input[type="radio"]');
-    radio.addEventListener('change', () => {
-      if (radio.checked) {
+    // Attach event handlers
+    attachCardEventHandlers(card, item, {
+      showCopyButton: true,
+      onRadioChange: (cardEl) => {
         selectedStreamId = String(timestamp);
         // Update visual selection
         container.querySelectorAll('.sub-card[data-kind="stream"], .sub-card[data-kind="video-file"]').forEach(c => c.classList.remove('selected-stream'));
-        card.classList.add('selected-stream');
+        cardEl.classList.add('selected-stream');
         updateCommandBar();
-      }
+      },
+      onDirectDownload: true
     });
 
-    // Copy URL button
-    card.querySelector('[data-action="copy"]')?.addEventListener('click', () => {
-      navigator.clipboard.writeText(item.url)
-        .then(() => showToast('URL copied!'))
-        .catch(() => showToast('Copy failed', true));
-    });
-
-    // Direct download handler
-    card.querySelector('[data-action="direct-download"]')?.addEventListener('click', () => {
-      chrome.runtime.sendMessage({ 
-        cmd: 'DOWNLOAD_VIDEO', 
-        url: item.url, 
-        filename: item.name,
-        headers: item.headers || {}
-      }, (response) => {
-        if (response?.success) {
-          showToast('Download started!');
-        } else {
-          showToast('Download failed: ' + (response?.error || 'Unknown error'), true);
-        }
-      });
-    });
-
-    // Insert after video files section header
-    const sectionHeader = container.querySelector('.section-header[data-section="video-files"]');
-    if (sectionHeader) {
-      sectionHeader.after(card);
-    } else {
-      container.appendChild(card);
-    }
+    insertCardAfterSection(card, 'video-files');
   }
 
   function appendSubtitleCard(id, item) {
     showSection('subtitles');
-    
-    // Use URL-based ID to prevent duplicates from same-timestamp items
-    const urlHash = item.url?.slice(-50) || Math.random().toString(36);
-    const uniqueId = `${id}-${urlHash.replace(/[^a-zA-Z0-9]/g, '')}`;
+
+    const uniqueId = generateUniqueId(id, item.url);
     const timestamp = item.timestamp;
-    
-    if (container.querySelector(`[data-id="${CSS.escape(uniqueId)}"]`)) return;
 
-    stateEmpty.style.display = 'none';
-    stateLoading.style.display = 'none';
+    if (checkDuplicate(uniqueId)) return;
 
-    const card = document.createElement('div');
-    card.className = 'sub-card';
-    card.dataset.id = uniqueId;
-    card.dataset.timestamp = timestamp;
-    card.dataset.kind = 'subtitle';
+    showCardContainer();
+
+    const card = createBaseCard(uniqueId, timestamp, 'subtitle');
     card.dataset.subtitleUrl = item.url;
 
     const sizeTxt = formatSize(item.size);
     const metaParts = [item.format?.toUpperCase()];
-    
+
     if (sizeTxt) metaParts.push(sizeTxt);
     metaParts.push(timeAgo(item.timestamp));
-    
+
     const meta = metaParts.filter(Boolean).join(' · ');
 
-    card.innerHTML = `
-      <div class="card-main">
-        <div class="card-selector">
-          <input type="checkbox" data-sub-id="${timestamp}">
-        </div>
-        <span class="badge-format" style="background: #0077FF">${escHtml(item.format || '?')}</span>
-        <div class="card-info">
-          <div class="card-name" title="${escHtml(item.name)}">${escHtml(item.name)}</div>
-          <div class="card-url" title="${escHtml(item.url)}">${escHtml(item.url)}</div>
-          <div class="card-meta">${escHtml(meta)}</div>
-        </div>
-      </div>
+    card.innerHTML = buildCardMainHtml(item, meta, '#0077FF', 'checkbox', null, timestamp, 'data-sub-id', false) + `
       <div class="card-actions">
         <a class="action-btn btn-download" href="${escHtml(item.url)}" download="${escHtml(item.name)}" target="_blank">
           <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
@@ -855,11 +926,12 @@ function initTheme() {
       </div>
     `;
 
-    // Checkbox change handler
-    const checkbox = card.querySelector('input[type="checkbox"]');
-    checkbox.addEventListener('change', () => {
-      updateSelectAllButton();
-      updateCommandBar();
+    // Attach event handlers
+    attachCardEventHandlers(card, item, {
+      onCheckboxChange: () => {
+        updateSelectAllButton();
+        updateCommandBar();
+      }
     });
 
     // Add language detection for subtitles
@@ -868,7 +940,7 @@ function initTheme() {
     langBadge.style.cssText = 'background: #28a745; color: #fff; font-size: 9px; font-weight: 600; padding: 2px 5px; border-radius: 4px; margin-left: 6px; text-transform: uppercase; opacity: 0; transition: opacity 0.2s;';
     langBadge.textContent = '...';
     card.querySelector('.card-info').appendChild(langBadge);
-    
+
     // Detect language asynchronously
     detectSubtitleLanguage(item.url, item.headers).then(langCode => {
       if (langCode) {
@@ -885,14 +957,7 @@ function initTheme() {
       langBadge.remove();
     });
 
-    // Insert after subtitles section header (or at the end if no video files)
-    const sectionHeader = container.querySelector('.section-header[data-section="subtitles"]');
-    if (sectionHeader) {
-      sectionHeader.after(card);
-    } else {
-      container.appendChild(card);
-    }
-    
+    insertCardAfterSection(card, 'subtitles');
     updateSelectAllButton();
   }
 
