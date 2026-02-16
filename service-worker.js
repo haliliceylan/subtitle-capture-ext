@@ -175,49 +175,120 @@ function formatDuration(seconds) {
   return `${secs}s`;
 }
 
-// Fetch and parse media playlist to calculate total duration
-async function getMediaPlaylistDuration(mediaUrl, tabId) {
-  console.log('[DEBUG] Fetching media playlist duration via content script:', mediaUrl);
+// Helper function to ensure content script is ready in a tab
+async function ensureContentScriptReady(tabId) {
+  console.log('[DEBUG] Ensuring content script is ready for tab:', tabId);
 
   try {
-    // Send message to content script to fetch the media playlist
-    // The content script runs in the page context and can use the page's Origin/Referer headers
-    const response = await chrome.tabs.sendMessage(tabId, {
-      action: 'fetchMediaPlaylist',
-      url: mediaUrl
+    // Try to ping the content script
+    const response = await chrome.tabs.sendMessage(tabId, { action: 'ping' });
+    if (response && response.success) {
+      console.log('[DEBUG] Content script is already ready');
+      return true;
+    }
+  } catch (error) {
+    console.log('[DEBUG] Content script not ready, will inject:', error.message);
+  }
+
+  // Content script not ready, inject it
+  try {
+    console.log('[DEBUG] Injecting content script into tab:', tabId);
+    await chrome.scripting.executeScript({
+      target: { tabId },
+      files: ['content-script.js']
     });
 
-    if (!response || !response.success) {
-      console.warn('[DEBUG] Media playlist fetch failed:', response?.error || 'Unknown error');
-      return null;
+    // Wait briefly for injection to complete
+    await new Promise(resolve => setTimeout(resolve, 200));
+
+    // Verify it's now ready
+    try {
+      const response = await chrome.tabs.sendMessage(tabId, { action: 'ping' });
+      if (response && response.success) {
+        console.log('[DEBUG] Content script injected and ready');
+        return true;
+      }
+    } catch (verifyError) {
+      console.warn('[DEBUG] Content script injection verification failed:', verifyError.message);
+    }
+  } catch (injectError) {
+    console.warn('[DEBUG] Failed to inject content script:', injectError.message);
+  }
+
+  return false;
+}
+
+// Helper function to delay execution
+function delay(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+// Fetch and parse media playlist to calculate total duration
+async function getMediaPlaylistDuration(mediaUrl, tabId, retries = 3) {
+  console.log('[DEBUG] Fetching media playlist duration via content script:', mediaUrl, 'retries:', retries);
+
+  let lastError = null;
+
+  for (let attempt = 0; attempt < retries; attempt++) {
+    if (attempt > 0) {
+      // Exponential backoff: 200ms, 400ms, 600ms
+      const backoffMs = 200 * attempt;
+      console.log(`[DEBUG] Retry attempt ${attempt + 1}/${retries}, waiting ${backoffMs}ms...`);
+      await delay(backoffMs);
     }
 
-    console.log('[DEBUG] Media playlist fetched successfully, parsing duration...');
+    try {
+      // Ensure content script is ready before each attempt
+      const isReady = await ensureContentScriptReady(tabId);
+      if (!isReady) {
+        console.warn('[DEBUG] Content script not ready, skipping attempt');
+        lastError = new Error('Content script not ready');
+        continue;
+      }
 
-    const content = response.content;
-    const lines = content.split('\n').map(l => l.trim()).filter(l => l);
+      // Send message to content script to fetch the media playlist
+      // The content script runs in the page context and can use the page's Origin/Referer headers
+      const response = await chrome.tabs.sendMessage(tabId, {
+        action: 'fetchMediaPlaylist',
+        url: mediaUrl
+      });
 
-    let totalDuration = 0;
-    let segmentCount = 0;
+      if (!response || !response.success) {
+        console.warn('[DEBUG] Media playlist fetch failed:', response?.error || 'Unknown error');
+        lastError = new Error(response?.error || 'Unknown error');
+        continue;
+      }
 
-    for (const line of lines) {
-      if (line.startsWith('#EXTINF:')) {
-        // Parse duration from #EXTINF:10.000, or #EXTINF:10,
-        const durationMatch = line.match(/#EXTINF:([\d.]+)/);
-        if (durationMatch) {
-          totalDuration += parseFloat(durationMatch[1]);
-          segmentCount++;
+      console.log('[DEBUG] Media playlist fetched successfully, parsing duration...');
+
+      const content = response.content;
+      const lines = content.split('\n').map(l => l.trim()).filter(l => l);
+
+      let totalDuration = 0;
+      let segmentCount = 0;
+
+      for (const line of lines) {
+        if (line.startsWith('#EXTINF:')) {
+          // Parse duration from #EXTINF:10.000, or #EXTINF:10,
+          const durationMatch = line.match(/#EXTINF:([\d.]+)/);
+          if (durationMatch) {
+            totalDuration += parseFloat(durationMatch[1]);
+            segmentCount++;
+          }
         }
       }
+
+      console.log(`[DEBUG] Parsed media playlist: ${segmentCount} segments, total duration: ${totalDuration}s`);
+
+      return totalDuration > 0 ? totalDuration : null;
+    } catch (error) {
+      console.warn(`[DEBUG] Attempt ${attempt + 1}/${retries} failed:`, error.message);
+      lastError = error;
     }
-
-    console.log(`[DEBUG] Parsed media playlist: ${segmentCount} segments, total duration: ${totalDuration}s`);
-
-    return totalDuration > 0 ? totalDuration : null;
-  } catch (error) {
-    console.warn('[DEBUG] Failed to fetch media playlist duration:', error);
-    return null;
   }
+
+  console.warn('[DEBUG] All retry attempts exhausted for media playlist duration:', lastError?.message);
+  return null;
 }
 
 // Parse codec string to extract video codec
@@ -782,6 +853,13 @@ chrome.webRequest.onResponseStarted.addListener(
     if (mediaType === 'hls') {
       try {
         console.log('[DEBUG] About to fetch m3u8 via content script for:', url);
+
+        // Ensure content script is ready before attempting to fetch
+        const isReady = await ensureContentScriptReady(tabId);
+        if (!isReady) {
+          console.warn('[DEBUG] Content script not ready, skipping HLS master playlist fetch');
+          throw new Error('Content script not ready');
+        }
 
         // Send message to content script in the specific tab to fetch the m3u8
         // The content script runs in the page context and can use the page's Origin/Referer headers

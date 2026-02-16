@@ -4,6 +4,11 @@
 
 // Listen for messages from the service worker
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+  if (request.action === 'ping') {
+    sendResponse({ success: true });
+    return;
+  }
+
   if (request.action === 'fetchM3U8') {
     fetchM3U8Content(request.url)
       .then(content => sendResponse({ success: true, content }))
