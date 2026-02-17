@@ -2,29 +2,49 @@
 // This allows the fetch to automatically use the page's Origin and Referer headers
 // Acts as a simple proxy - just fetches and returns raw content
 
+console.log('[ContentScript] HLS content script loaded - version with debug logging');
+
 // Listen for messages from the service worker
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+  console.log('[ContentScript] Received message:', request.action, 'from sender:', sender);
+
   if (request.action === 'ping') {
+    console.log('[ContentScript] Ping received, responding');
     sendResponse({ success: true });
     return;
   }
 
   if (request.action === 'fetchM3U8') {
-    fetchM3U8Content(request.url)
-      .then(content => sendResponse({ success: true, content }))
-      .catch(error => sendResponse({ success: false, error: error.message }));
+    console.log('[ContentScript] fetchM3U8 action received');
+    console.log('[ContentScript] URL:', request.url);
+    console.log('[ContentScript] Headers received:', JSON.stringify(request.headers, null, 2));
+    
+    fetchM3U8Content(request.url, request.headers)
+      .then(content => {
+        console.log('[ContentScript] fetchM3U8 success, content length:', content.length);
+        sendResponse({ success: true, content });
+      })
+      .catch(error => {
+        console.error('[ContentScript] fetchM3U8 failed:', error.message);
+        console.error('[ContentScript] Error stack:', error.stack);
+        sendResponse({ success: false, error: error.message });
+      });
     return true; // Keep channel open for async response
   }
 
   if (request.action === 'fetchMediaPlaylist') {
-    console.log('[ContentScript] fetchMediaPlaylist action received for:', request.url);
-    fetchM3U8Content(request.url)
+    console.log('[ContentScript] fetchMediaPlaylist action received');
+    console.log('[ContentScript] URL:', request.url);
+    console.log('[ContentScript] Headers received:', JSON.stringify(request.headers, null, 2));
+    
+    fetchM3U8Content(request.url, request.headers)
       .then(content => {
-        console.log('[ContentScript] Media playlist fetched successfully, length:', content.length);
+        console.log('[ContentScript] fetchMediaPlaylist success, content length:', content.length);
         sendResponse({ success: true, content });
       })
       .catch(error => {
-        console.error('[ContentScript] Media playlist fetch failed:', error.message);
+        console.error('[ContentScript] fetchMediaPlaylist failed:', error.message);
+        console.error('[ContentScript] Error stack:', error.stack);
         sendResponse({ success: false, error: error.message });
       });
     return true; // Keep channel open for async response
@@ -32,23 +52,92 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 });
 
 // Simple fetch function - just gets the content, no parsing
-async function fetchM3U8Content(url) {
-  console.log('[ContentScript] Fetching m3u8:', url);
+// headers parameter allows proxying headers from the service worker
+async function fetchM3U8Content(url, headers = {}) {
+  console.log('[ContentScript] fetchM3U8Content called');
+  console.log('[ContentScript] URL:', url);
+  console.log('[ContentScript] Raw headers object:', headers);
+  console.log('[ContentScript] Header keys:', Object.keys(headers));
 
-  // Fetch in page context - automatically gets proper Origin/Referer headers
-  const response = await fetch(url, {
-    method: 'GET',
-    signal: AbortSignal.timeout(10000)
-  });
+  try {
+    // Build fetch options
+    const fetchOptions = {
+      method: 'GET',
+      credentials: 'same-origin',
+      signal: AbortSignal.timeout(10000)
+    };
+    console.log('[ContentScript] Initial fetchOptions:', JSON.stringify(fetchOptions, null, 2));
 
-  console.log('[ContentScript] Fetch response status:', response.status);
+    // Check if we have any headers to process
+    const headerKeys = Object.keys(headers || {});
+    console.log('[ContentScript] Number of headers to process:', headerKeys.length);
 
-  if (!response.ok) {
-    throw new Error(`HTTP ${response.status}`);
+    if (headerKeys.length > 0) {
+      console.log('[ContentScript] Processing headers...');
+      
+      // Build headers object - only include truly safe headers
+      const safeHeaders = {};
+      
+      for (const [key, value] of Object.entries(headers)) {
+        console.log(`[ContentScript] Processing header: "${key}" = "${value}"`);
+        
+        if (!key || value === undefined) {
+          console.log(`[ContentScript] Skipping empty header: ${key}`);
+          continue;
+        }
+        
+        const lowerKey = key.toLowerCase();
+        console.log(`[ContentScript] Header lowercase: "${lowerKey}"`);
+        
+        // Only allow specific safe headers
+        // Let the browser handle: origin, referer, cookie, host, etc.
+        const allowedHeaders = ['authorization', 'x-custom-token', 'x-requested-with'];
+        
+        if (allowedHeaders.includes(lowerKey)) {
+          console.log(`[ContentScript] Header "${key}" is ALLOWED`);
+          safeHeaders[key] = value;
+        } else {
+          console.log(`[ContentScript] Header "${key}" is BLOCKED (not in allowed list)`);
+        }
+      }
+      
+      console.log('[ContentScript] Safe headers to use:', JSON.stringify(safeHeaders, null, 2));
+      
+      // Only add headers if we have safe ones
+      const safeHeaderKeys = Object.keys(safeHeaders);
+      if (safeHeaderKeys.length > 0) {
+        fetchOptions.headers = safeHeaders;
+        console.log('[ContentScript] Added safe headers to fetchOptions');
+      } else {
+        console.log('[ContentScript] No safe headers to add, using default fetch');
+      }
+    } else {
+      console.log('[ContentScript] No headers provided, using default fetch');
+    }
+
+    console.log('[ContentScript] Final fetchOptions:', JSON.stringify(fetchOptions, null, 2));
+    console.log('[ContentScript] About to call fetch...');
+
+    const response = await fetch(url, fetchOptions);
+
+    console.log('[ContentScript] Fetch completed');
+    console.log('[ContentScript] Response status:', response.status);
+    console.log('[ContentScript] Response statusText:', response.statusText);
+    console.log('[ContentScript] Response headers:', [...response.headers.entries()]);
+
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+    }
+
+    const content = await response.text();
+    console.log('[ContentScript] Content received, length:', content.length);
+    return content;
+  } catch (error) {
+    console.error('[ContentScript] Exception in fetchM3U8Content:', error.message);
+    console.error('[ContentScript] Error name:', error.name);
+    console.error('[ContentScript] Error stack:', error.stack);
+    throw error;
   }
-
-  const content = await response.text();
-  return content;
 }
 
-console.log('[ContentScript] HLS content script loaded');
+console.log('[ContentScript] Content script setup complete');

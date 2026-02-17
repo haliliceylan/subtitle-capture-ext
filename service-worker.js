@@ -37,6 +37,18 @@ const STRIP_HEADERS = new Set([
   'cache-control', 'pragma'
 ]);
 
+// Forbidden headers that cannot be set via JavaScript fetch (browser-controlled)
+// See: https://developer.mozilla.org/en-US/docs/Glossary/Forbidden_header_name
+const FORBIDDEN_HEADERS = new Set([
+  'accept-charset', 'accept-encoding', 'access-control-request-headers', 'access-control-request-method',
+  'connection', 'content-length', 'cookie', 'cookie2', 'date', 'dnt', 'expect', 'host', 'keep-alive',
+  'origin', 'referer', 'set-cookie', 'te', 'trailer', 'transfer-encoding', 'upgrade', 'via',
+  // Additional headers that cause "unsafe header" errors in content scripts
+  'user-agent', 'sec-ch-ua', 'sec-ch-ua-mobile', 'sec-ch-ua-platform', 'sec-ch-ua-full-version',
+  'sec-ch-ua-full-version-list', 'sec-ch-ua-arch', 'sec-ch-ua-bitness', 'sec-ch-ua-model',
+  'sec-ch-ua-platform-version', 'sec-ch-ua-wow64'
+]);
+
 // Constants for magic numbers
 const MAX_ITEMS_PER_TAB = 50;
 const FETCH_TIMEOUT_MS = 5000;
@@ -116,7 +128,9 @@ function sanitizeHeaders(reqHeaders) {
   for (const h of reqHeaders) {
     const k = h.name || '';
     if (!k) continue;
-    if (!STRIP_HEADERS.has(k.toLowerCase())) {
+    // Skip both STRIP_HEADERS and FORBIDDEN_HEADERS
+    const lowerK = k.toLowerCase();
+    if (!STRIP_HEADERS.has(lowerK) && !FORBIDDEN_HEADERS.has(lowerK)) {
       headers[k] = h.value || '';
     }
   }
@@ -224,7 +238,7 @@ function delay(ms) {
 }
 
 // Fetch and parse media playlist to calculate total duration
-async function getMediaPlaylistDuration(mediaUrl, tabId, retries = 3) {
+async function getMediaPlaylistDuration(mediaUrl, tabId, headers = {}, retries = 3) {
   let lastError = null;
 
   for (let attempt = 0; attempt < retries; attempt++) {
@@ -244,10 +258,18 @@ async function getMediaPlaylistDuration(mediaUrl, tabId, retries = 3) {
 
       // Send message to content script to fetch the media playlist
       // The content script runs in the page context and can use the page's Origin/Referer headers
+      // Pass headers to the content script so it can use them for authentication
+      console.log('[ServiceWorker] Sending fetchMediaPlaylist message to tab', tabId);
+      console.log('[ServiceWorker] URL:', mediaUrl);
+      console.log('[ServiceWorker] Headers being sent:', JSON.stringify(headers, null, 2));
+      
       const response = await chrome.tabs.sendMessage(tabId, {
         action: 'fetchMediaPlaylist',
-        url: mediaUrl
+        url: mediaUrl,
+        headers: headers
       });
+      
+      console.log('[ServiceWorker] Received response from content script:', response);
 
       if (!response || !response.success) {
         lastError = new Error(response?.error || 'Unknown error');
@@ -282,9 +304,9 @@ async function getMediaPlaylistDuration(mediaUrl, tabId, retries = 3) {
 // Parse codec string to extract video codec
 function parseCodec(codecsString) {
   if (!codecsString) return null;
-  
+
   const codecs = codecsString.split(',').map(c => c.trim().toLowerCase());
-  
+
   for (const codec of codecs) {
     if (codec.includes('hvc1') || codec.includes('hev1') || codec.includes('hevc')) return 'H265';
     if (codec.includes('avc1') || codec.includes('avc3')) return 'H264';
@@ -294,8 +316,55 @@ function parseCodec(codecsString) {
     if (codec.includes('opus')) return 'Opus';
     if (codec.includes('mp3') || codec.includes('mp4a.40.34')) return 'MP3';
   }
-  
+
   return null;
+}
+
+// Parse audio codec from codecs string
+function parseAudioCodec(codecsString) {
+  if (!codecsString) return null;
+
+  const codecs = codecsString.split(',').map(c => c.trim().toLowerCase());
+
+  for (const codec of codecs) {
+    if (codec.includes('mp4a')) return 'AAC';
+    if (codec.includes('opus')) return 'Opus';
+    if (codec.includes('mp3') || codec.includes('mp4a.40.34')) return 'MP3';
+    if (codec.includes('ac-3') || codec.includes('ac3')) return 'AC3';
+    if (codec.includes('ec-3') || codec.includes('ec3') || codec.includes('eac3')) return 'EAC3';
+    if (codec.includes('flac')) return 'FLAC';
+    if (codec.includes('dts')) return 'DTS';
+  }
+
+  return null;
+}
+
+// Parse audio groups from #EXT-X-MEDIA tags
+function parseAudioGroups(lines) {
+  const audioGroups = new Map(); // group-id -> array of audio tracks
+
+  for (const line of lines) {
+    if (line.startsWith('#EXT-X-MEDIA:')) {
+      const typeMatch = line.match(/TYPE=([^,\s]+)/);
+      if (!typeMatch || typeMatch[1] !== 'AUDIO') continue;
+
+      const groupIdMatch = line.match(/GROUP-ID="([^"]+)"/);
+      const languageMatch = line.match(/LANGUAGE="([^"]+)"/);
+      const nameMatch = line.match(/NAME="([^"]+)"/);
+
+      if (groupIdMatch) {
+        const groupId = groupIdMatch[1];
+        const language = languageMatch ? languageMatch[1] : (nameMatch ? nameMatch[1] : 'unknown');
+
+        if (!audioGroups.has(groupId)) {
+          audioGroups.set(groupId, []);
+        }
+        audioGroups.get(groupId).push(language);
+      }
+    }
+  }
+
+  return audioGroups;
 }
 
 // Derive display name for variant
@@ -323,7 +392,7 @@ async function enrichHlsItemWithDuration(itemData, playlistInfo, tabId) {
   const firstVariant = playlistInfo.variants[0];
   if (firstVariant && firstVariant.url) {
     try {
-      const duration = await getMediaPlaylistDuration(firstVariant.url, tabId);
+      const duration = await getMediaPlaylistDuration(firstVariant.url, tabId, itemData.headers);
       if (duration) {
         itemData.duration = duration;
         itemData.durationFormatted = formatDuration(duration);
@@ -355,6 +424,9 @@ function parseHLSMasterPlaylistContent(url, content) {
       // Not a master playlist (might be a media playlist)
       return { isMasterPlaylist: false, variants: [] };
     }
+
+    // Parse audio groups first (before processing variants)
+    const audioGroups = parseAudioGroups(lines);
 
     const variants = [];
     let currentVariant = null;
@@ -421,8 +493,12 @@ function parseHLSMasterPlaylistContent(url, content) {
           bitrate: formatBitrate(currentVariant.bandwidth),
           resolution: currentVariant.resolution,
           codec: parseCodec(currentVariant.codecs),
+          audioCodec: parseAudioCodec(currentVariant.codecs),
           codecs: currentVariant.codecs,
-          frameRate: currentVariant.frameRate
+          frameRate: currentVariant.frameRate,
+          audioLanguages: currentVariant.audio && audioGroups.has(currentVariant.audio)
+            ? audioGroups.get(currentVariant.audio)
+            : []
         };
 
         variant.name = deriveVariantName(variant);
@@ -449,7 +525,16 @@ async function parseHLSMasterPlaylist(url, headers = {}) {
     const fetchHeaders = new Headers();
     Object.entries(headers).forEach(([k, v]) => {
       if (k && v !== undefined) {
-        fetchHeaders.set(k, v);
+        // Skip forbidden headers that cannot be set via JavaScript
+        // These are browser-controlled headers that will cause "Unsafe header" errors
+        if (!FORBIDDEN_HEADERS.has(k.toLowerCase())) {
+          try {
+            fetchHeaders.set(k, v);
+          } catch (e) {
+            // Silently skip headers that can't be set (e.g., invalid header names)
+            console.warn('[ServiceWorker] Skipping header that cannot be set:', k);
+          }
+        }
       }
     });
 
@@ -712,19 +797,61 @@ function buildFfmpegCommand(streamItem, subtitleItems = [], outputFormat = 'mp4'
 async function downloadVideo(url, filename, headers = {}) {
   // Build headers array for chrome.downloads API
   const headerArray = Object.entries(headers).map(([name, value]) => ({ name, value }));
-  
+
   const downloadOptions = {
     url: url,
     filename: filename || 'video.mp4',
     saveAs: false
   };
-  
+
   // Add headers if present
   if (headerArray.length > 0) {
     downloadOptions.headers = headerArray;
   }
-  
+
   return chrome.downloads.download(downloadOptions);
+}
+
+async function downloadSubtitle(url, filename, headers = {}) {
+  console.log('[ServiceWorker] downloadSubtitle called');
+  console.log('[ServiceWorker] URL:', url);
+  console.log('[ServiceWorker] Raw headers:', JSON.stringify(headers, null, 2));
+
+  // Build headers array for chrome.downloads API
+  // Filter out forbidden headers that chrome.downloads can't handle
+  const headerArray = [];
+  for (const [name, value] of Object.entries(headers)) {
+    const lowerName = name.toLowerCase();
+    if (!FORBIDDEN_HEADERS.has(lowerName)) {
+      headerArray.push({ name, value });
+      console.log('[ServiceWorker] Adding header to download:', name);
+    } else {
+      console.log('[ServiceWorker] Skipping forbidden header:', name);
+    }
+  }
+
+  const downloadOptions = {
+    url: url,
+    filename: filename || 'subtitle.vtt',
+    saveAs: false
+  };
+
+  // Add headers if present
+  if (headerArray.length > 0) {
+    downloadOptions.headers = headerArray;
+    console.log('[ServiceWorker] Download options with headers:', JSON.stringify(downloadOptions, null, 2));
+  } else {
+    console.log('[ServiceWorker] Download options without headers');
+  }
+
+  try {
+    const downloadId = await chrome.downloads.download(downloadOptions);
+    console.log('[ServiceWorker] Download started with ID:', downloadId);
+    return downloadId;
+  } catch (error) {
+    console.error('[ServiceWorker] Download failed:', error.message);
+    throw error;
+  }
 }
 
 async function updateBadge(tabId) {
@@ -861,10 +988,18 @@ chrome.webRequest.onResponseStarted.addListener(
 
         // Send message to content script in the specific tab to fetch the m3u8
         // The content script runs in the page context and can use the page's Origin/Referer headers
+        // Pass headers so the content script can use them for authentication
+        console.log('[ServiceWorker] Sending fetchM3U8 message to tab', tabId);
+        console.log('[ServiceWorker] URL:', url);
+        console.log('[ServiceWorker] Headers being sent:', JSON.stringify(headers, null, 2));
+        
         const response = await chrome.tabs.sendMessage(tabId, {
           action: 'fetchM3U8',
-          url: url
+          url: url,
+          headers: headers
         });
+        
+        console.log('[ServiceWorker] Received response from content script:', response);
 
         if (response && response.success) {
           // Parse the m3u8 content in the service worker (all heavy logic stays here)
@@ -949,6 +1084,23 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     downloadVideo(url, filename, headers)
       .then(downloadId => sendResponse({ success: true, downloadId }))
       .catch(error => sendResponse({ success: false, error: error.message }));
+    return true;
+  }
+
+  if (message.cmd === 'DOWNLOAD_SUBTITLE') {
+    console.log('[ServiceWorker] Received DOWNLOAD_SUBTITLE command');
+    const { url, filename, headers } = message;
+    console.log('[ServiceWorker] Download request:', { url, filename, headers: Object.keys(headers || {}) });
+    
+    downloadSubtitle(url, filename, headers)
+      .then(downloadId => {
+        console.log('[ServiceWorker] Download successful, ID:', downloadId);
+        sendResponse({ success: true, downloadId });
+      })
+      .catch(error => {
+        console.error('[ServiceWorker] Download failed:', error.message);
+        sendResponse({ success: false, error: error.message });
+      });
     return true;
   }
 });

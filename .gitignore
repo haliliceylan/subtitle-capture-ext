@@ -10,3 +10,6 @@ Thumbs.db
 *.swp
 *.swo
 *~
+**/node_modules/**
+.kilocode/skills/playwright-skill/package-lock.json
+.kilocode/skills/playwright-skill/.temp*

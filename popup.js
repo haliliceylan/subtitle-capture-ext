@@ -177,6 +177,9 @@ function initTheme() {
   const toast = document.getElementById('toast');
   const commandBar = document.getElementById('command-bar');
   const commandSelection = document.getElementById('command-selection');
+
+  const btnCommandDownloadSubs = document.getElementById('btn-command-download-subs');
+  const commandRowSecondary = document.getElementById('command-row-secondary');
   const btnCommandMpv = document.getElementById('btn-command-mpv');
   const btnCommandFfmpeg = document.getElementById('btn-command-ffmpeg');
   const ffmpegFormatSelect = document.getElementById('ffmpeg-format-select');
@@ -229,6 +232,9 @@ function initTheme() {
 
     // Create sections
     createSections();
+    
+    // Initialize keyboard navigation
+    initKeyboardNavigation();
 
     // Render items in sections
     hlsDashStreams.sort((a, b) => b.timestamp - a.timestamp).forEach((item) => appendStreamCard(`stream-${item.timestamp}`, item));
@@ -238,6 +244,7 @@ function initTheme() {
 
     updateCommandBar();
     updateSelectAllButton();
+    updateSectionEmptyStates();
   });
 
   chrome.runtime.onMessage.addListener((msg) => {
@@ -270,6 +277,7 @@ function initTheme() {
       
       updateCommandBar();
       updateSelectAllButton();
+      updateSectionEmptyStates();
     }
   });
 
@@ -280,9 +288,10 @@ function initTheme() {
         showToast('Failed to clear items', true);
         return;
       }
-      container.querySelectorAll('.sub-card').forEach(c => c.remove());
-      // Remove section headers
-      container.querySelectorAll('.section-header').forEach(h => h.remove());
+      // Remove both old cards and new list items
+      container.querySelectorAll('.sub-card, .list-item-wrapper').forEach(c => c.remove());
+      // Remove section headers and empty states
+      container.querySelectorAll('.section-header, .section-empty-state').forEach(h => h.remove());
       streamsSection = null;
       subtitlesSection = null;
       videoFilesSection = null;
@@ -292,8 +301,11 @@ function initTheme() {
       selectedStreamId = null;
       btnSelectAllSection = null;
       languageCache.clear();
+      subtitleLanguageCache.clear();
+      selectedVariants.clear();
       updateSelectAllButton();
       updateCommandBar();
+      updateSectionEmptyStates();
       showEmpty();
       showToast('Cleared');
     });
@@ -302,15 +314,72 @@ function initTheme() {
   // Theme toggle button
   btnThemeToggle.addEventListener('click', cycleTheme);
 
+  // Download Selected Subtitles button handler
+  btnCommandDownloadSubs.addEventListener('click', () => {
+    if (btnCommandDownloadSubs.disabled) return;
+
+    const selectedSubs = getSelectedSubtitles();
+    if (selectedSubs.length === 0) {
+      showToast('No subtitles selected', true);
+      return;
+    }
+
+    setButtonLoading(btnCommandDownloadSubs, true);
+
+    // Download each selected subtitle
+    let successCount = 0;
+    let failCount = 0;
+
+    selectedSubs.forEach((sub, index) => {
+      // Use a small delay between downloads to avoid overwhelming the browser
+      setTimeout(() => {
+        chrome.runtime.sendMessage({
+          cmd: 'DOWNLOAD_SUBTITLE',
+          url: sub.url,
+          filename: sub.name || `subtitle_${index + 1}.${sub.format?.toLowerCase() || 'vtt'}`,
+          headers: sub.headers || {}
+        }, (response) => {
+          if (chrome.runtime.lastError) {
+            console.error('Failed to download subtitle:', chrome.runtime.lastError.message);
+            failCount++;
+            if (failCount + successCount === selectedSubs.length) {
+              showToast(`Downloaded ${successCount}, failed ${failCount}`, failCount > 0);
+              setButtonLoading(btnCommandDownloadSubs, false);
+            }
+            return;
+          }
+          if (response?.success) {
+            successCount++;
+          } else {
+            failCount++;
+          }
+          if (failCount + successCount === selectedSubs.length) {
+            showToast(`Downloaded ${successCount} subtitle${successCount !== 1 ? 's' : ''}`, failCount > 0);
+            setButtonLoading(btnCommandDownloadSubs, false);
+          }
+        });
+      }, index * 100); // 100ms delay between each download
+    });
+  });
+
   // Select all subtitles functionality - now in section header
   function handleSelectAllClick() {
-    const checkboxes = container.querySelectorAll('.sub-card[data-kind="subtitle"] input[type="checkbox"]');
+    const checkboxes = container.querySelectorAll('.list-item[data-kind="subtitle"] input[type="checkbox"]');
     const allChecked = Array.from(checkboxes).every(cb => cb.checked);
-    
+
     checkboxes.forEach(cb => {
       cb.checked = !allChecked;
+      // Update visual selection state on the parent list-item
+      const listItem = cb.closest('.list-item');
+      if (listItem) {
+        if (!allChecked) {
+          listItem.classList.add('selected');
+        } else {
+          listItem.classList.remove('selected');
+        }
+      }
     });
-    
+
     updateSelectAllButton();
     updateCommandBar();
     showToast(allChecked ? 'All subtitles deselected' : 'All subtitles selected');
@@ -318,7 +387,7 @@ function initTheme() {
 
   // Helper function to get stream item with variant URL if selected
   function getEffectiveStreamItem(streamId) {
-    // streamId is now the URL
+    // streamId is the URL
     const streamItem = Object.values(streamItems).find(s => s.url === streamId);
     if (!streamItem) return null;
     
@@ -339,122 +408,220 @@ function initTheme() {
     return streamItem;
   }
 
+  // Helper function to get selected variant info for display
+  function getSelectedVariantInfo(streamId) {
+    const selectedVariant = selectedVariants.get(streamId);
+    if (selectedVariant && selectedVariant.variant) {
+      return selectedVariant.variant;
+    }
+    return null;
+  }
+
   // Command bar MPV button
-  btnCommandMpv.addEventListener('click', () => {
+  btnCommandMpv.addEventListener('click', async () => {
     if (!selectedStreamId) return;
+    
+    setButtonLoading(btnCommandMpv, true);
     
     const streamItem = getEffectiveStreamItem(selectedStreamId);
     
     if (!streamItem) {
       showToast('Stream not found', true);
+      setButtonLoading(btnCommandMpv, false);
       return;
     }
     
     const selectedSubs = getSelectedSubtitles();
     
-    chrome.runtime.sendMessage({ cmd: 'BUILD_MPV', streamItem, subtitleItems: selectedSubs }, (response) => {
+    chrome.runtime.sendMessage({ cmd: 'BUILD_MPV', streamItem, subtitleItems: selectedSubs }, async (response) => {
       if (chrome.runtime.lastError) {
         console.error('Failed to build mpv command:', chrome.runtime.lastError.message);
         showToast('Failed to build mpv command', true);
+        setButtonLoading(btnCommandMpv, false);
         return;
       }
       if (response?.command) {
-        navigator.clipboard.writeText(response.command)
-          .then(() => showToast('mpv command copied!'))
-          .catch(() => showToast('Copy failed', true));
+        try {
+          await navigator.clipboard.writeText(response.command);
+          showToast('mpv command copied!');
+        } catch {
+          showToast('Copy failed', true);
+        }
       } else {
         showToast('Failed to build command', true);
       }
+      setButtonLoading(btnCommandMpv, false);
     });
   });
 
   // Command bar FFMPEG button - copies command immediately
-  btnCommandFfmpeg.addEventListener('click', () => {
+  btnCommandFfmpeg.addEventListener('click', async () => {
     if (!selectedStreamId) return;
+    
+    setButtonLoading(btnCommandFfmpeg, true);
     
     const streamItem = getEffectiveStreamItem(selectedStreamId);
     
     if (!streamItem) {
       showToast('Stream not found', true);
+      setButtonLoading(btnCommandFfmpeg, false);
       return;
     }
     
     const selectedSubs = getSelectedSubtitles();
     const outputFormat = ffmpegFormatSelect?.value || 'mp4';
     
-    chrome.runtime.sendMessage({ cmd: 'BUILD_FFMPEG', streamItem, subtitleItems: selectedSubs, outputFormat, outputFilename: tabTitle }, (response) => {
+    chrome.runtime.sendMessage({ cmd: 'BUILD_FFMPEG', streamItem, subtitleItems: selectedSubs, outputFormat, outputFilename: tabTitle }, async (response) => {
       if (chrome.runtime.lastError) {
         console.error('Failed to build ffmpeg command:', chrome.runtime.lastError.message);
         showToast('Failed to build ffmpeg command', true);
+        setButtonLoading(btnCommandFfmpeg, false);
         return;
       }
       if (response?.command) {
-        navigator.clipboard.writeText(response.command)
-          .then(() => showToast('ffmpeg command copied!'))
-          .catch(() => showToast('Copy failed', true));
+        try {
+          await navigator.clipboard.writeText(response.command);
+          showToast('ffmpeg command copied!');
+        } catch {
+          showToast('Copy failed', true);
+        }
       } else {
         showToast('Failed to build command', true);
       }
+      setButtonLoading(btnCommandFfmpeg, false);
     });
   });
 
   function updateSelectAllButton() {
-    const checkboxes = container.querySelectorAll('.sub-card[data-kind="subtitle"] input[type="checkbox"]');
+    const checkboxes = container.querySelectorAll('.list-item[data-kind="subtitle"] input[type="checkbox"]');
     const subtitleCount = checkboxes.length;
-    
+
     if (!btnSelectAllSection) return;
-    
+
     if (subtitleCount === 0) {
       btnSelectAllSection.style.display = 'none';
     } else {
       btnSelectAllSection.style.display = 'block';
-      const allChecked = Array.from(checkboxes).every(cb => cb.checked);
+      const checkedCount = Array.from(checkboxes).filter(cb => cb.checked).length;
+      const allChecked = checkedCount === subtitleCount;
       btnSelectAllSection.textContent = allChecked ? 'Deselect all' : 'Select all';
       btnSelectAllSection.classList.toggle('all-selected', allChecked);
+      
+      // Update button title to show count
+      btnSelectAllSection.title = `${checkedCount} of ${subtitleCount} selected`;
     }
   }
 
   function updateCommandBar() {
     const selectedSubs = getSelectedSubtitles();
     const subtitleCount = selectedSubs.length;
-    
-    if (!selectedStreamId) {
-      commandBar.classList.add('disabled');
-      commandSelection.innerHTML = '<span class="empty">Select a stream to begin</span>';
-    } else {
-      commandBar.classList.remove('disabled');
-      const streamItem = getEffectiveStreamItem(selectedStreamId);
-      let streamName = streamItem?.name || 'Unknown';
-      
+    const hasStream = !!selectedStreamId;
+
+    // Get stream info if a stream is selected
+    let streamItem = null;
+    let streamName = '';
+    let streamFormat = '';
+    let streamResolution = '';
+    let streamSize = '';
+    let variantInfo = '';
+
+    if (hasStream) {
+      streamItem = getEffectiveStreamItem(selectedStreamId);
+      streamName = streamItem?.name || 'Unknown';
+      streamFormat = streamItem?.format?.toUpperCase() || '';
+      streamResolution = streamItem?.resolution || '';
+      streamSize = streamItem?.size ? formatSize(streamItem.size) : '';
+
       // If a variant is selected, show variant info in command bar
       const selectedVariant = selectedVariants.get(selectedStreamId);
       if (selectedVariant && selectedVariant.variant) {
-        streamName += ` (${selectedVariant.variant.name})`;
-      }
-      
-      if (subtitleCount > 0) {
-        commandSelection.innerHTML = `Selected: <span class="stream-name">${escHtml(streamName)}</span> + <span class="subtitle-count">${subtitleCount} subtitle${subtitleCount !== 1 ? 's' : ''}</span>`;
-      } else {
-        commandSelection.innerHTML = `Selected: <span class="stream-name">${escHtml(streamName)}</span>`;
+        const v = selectedVariant.variant;
+        // Build variant display string (e.g., "1080p" or "1080p H.264")
+        const variantParts = [];
+        if (v.resolution) variantParts.push(v.resolution);
+        else if (v.name) variantParts.push(v.name);
+        if (v.codec && !v.resolution) variantParts.push(v.codec);
+
+        if (variantParts.length > 0) {
+          variantInfo = ` (${variantParts.join(' ')})`;
+        }
+        // Update resolution from variant
+        if (v.resolution) streamResolution = v.resolution;
       }
     }
+
+    // Calculate total size estimate (stream + subtitles)
+    let totalSize = 0;
+    if (streamItem?.size) totalSize += streamItem.size;
+    selectedSubs.forEach(sub => {
+      if (sub.size) totalSize += sub.size;
+    });
+    const totalSizeFormatted = totalSize > 0 ? ` (~${formatSize(totalSize)})` : '';
+
+    // Determine selection state and update UI
+    const selectionState = {
+      nothing: !hasStream && subtitleCount === 0,
+      streamOnly: hasStream && subtitleCount === 0,
+      streamWithSubs: hasStream && subtitleCount > 0,
+      subsOnly: !hasStream && subtitleCount > 0
+    };
+
+    // Update selection summary text
+    if (selectionState.nothing) {
+      commandBar.classList.add('disabled');
+      commandSelection.innerHTML = '<span class="empty">Select a stream or subtitles to begin</span>';
+    } else if (selectionState.streamOnly) {
+      commandBar.classList.remove('disabled');
+      const formatBadge = streamFormat ? `<span class="format-badge">${escHtml(streamFormat)}</span>` : '';
+      const resBadge = streamResolution ? `<span class="resolution-badge">${escHtml(streamResolution)}</span>` : '';
+      commandSelection.innerHTML = `Selected: ${formatBadge} ${resBadge} <span class="stream-name">${escHtml(streamName)}${escHtml(variantInfo)}</span><span class="size-estimate">${escHtml(totalSizeFormatted)}</span>`;
+    } else if (selectionState.streamWithSubs) {
+      commandBar.classList.remove('disabled');
+      const formatBadge = streamFormat ? `<span class="format-badge">${escHtml(streamFormat)}</span>` : '';
+      const resBadge = streamResolution ? `<span class="resolution-badge">${escHtml(streamResolution)}</span>` : '';
+      commandSelection.innerHTML = `Selected: ${formatBadge} ${resBadge} <span class="stream-name">${escHtml(streamName)}${escHtml(variantInfo)}</span> + <span class="subtitle-count">${subtitleCount} subtitle${subtitleCount !== 1 ? 's' : ''}</span><span class="size-estimate">${escHtml(totalSizeFormatted)}</span>`;
+    } else if (selectionState.subsOnly) {
+      commandBar.classList.remove('disabled');
+      commandSelection.innerHTML = `Selected: <span class="subtitle-count">${subtitleCount} subtitle${subtitleCount !== 1 ? 's' : ''}</span><span class="size-estimate">${escHtml(totalSizeFormatted)}</span>`;
+    }
+
+    // Update button states based on selection
+    updateCommandBarButtons(selectionState, hasStream, subtitleCount);
+  }
+
+  function updateCommandBarButtons(selectionState, hasStream, subtitleCount) {
+    // Determine visibility for secondary row
+    const showSecondaryRow = hasStream || subtitleCount > 0;
+    commandRowSecondary.style.display = showSecondaryRow ? 'flex' : 'none';
+
+    // Download Subtitles button: visible and enabled only when subtitles are selected
+    const showDownloadSubs = subtitleCount > 0;
+    btnCommandDownloadSubs.style.display = showDownloadSubs ? 'flex' : 'none';
+    btnCommandDownloadSubs.disabled = !showDownloadSubs;
+
+    // MPV button: enabled when stream is selected
+    btnCommandMpv.disabled = !hasStream;
+
+    // FFMPEG button: enabled when stream is selected
+    btnCommandFfmpeg.disabled = !hasStream;
+    ffmpegFormatSelect.disabled = !hasStream;
   }
 
   // Store detected language codes for subtitles
   const subtitleLanguageCache = new Map();
 
   function getSelectedSubtitles() {
-    return Array.from(container.querySelectorAll('.sub-card[data-kind="subtitle"] input[type="checkbox"]:checked'))
+    return Array.from(container.querySelectorAll('.list-item[data-kind="subtitle"] input[type="checkbox"]:checked'))
       .map(cb => {
-        const subCard = cb.closest('.sub-card');
-        const url = subCard?.dataset.subtitleUrl;
+        const listItem = cb.closest('.list-item');
+        const url = listItem?.dataset.subtitleUrl;
         if (!url) return null;
-        
+
         // Find by URL - guaranteed unique
         const foundItem = Object.values(subtitleItems).find(s => s.url === url);
         if (!foundItem) return null;
-        
-        // Include detected language code if available
+
+        // Include detected language code and name if available
         const langCode = subtitleLanguageCache.get(foundItem.url);
         if (langCode) {
           return {
@@ -463,7 +630,7 @@ function initTheme() {
             languageName: getLanguageName(langCode)
           };
         }
-        
+
         return foundItem;
       })
       .filter(Boolean);
@@ -471,50 +638,195 @@ function initTheme() {
 
   // ── Render helpers ────────────────────────────────────────
 
+  /**
+   * Builds a variant row HTML for inline display
+   * @param {Object} variant - The variant data
+   * @param {number} index - The variant index
+   * @param {string} streamUrlHash - Hashed stream URL for radio name
+   * @returns {string} HTML string for variant row
+   */
+  function buildVariantRowHtml(variant, index, streamUrlHash) {
+    const estimatedSize = variant.estimatedSizeFormatted || '';
+    const variantQuality = variant.resolution || '';
+    const variantMeta = variant.bitrate || '';
+    const variantCodecs = variant.codec || '';
+    
+    // Audio codec for variant - show only if non-AAC
+    const audioCodec = variant.audioCodec || '';
+    const audioCodecBadge = audioCodec && !audioCodec.toLowerCase().includes('aac')
+      ? `<span class="item-audio-codec" title="Audio: ${escHtml(audioCodec)}">${escHtml(audioCodec)}</span>`
+      : '';
+    
+    // Frame rate for variant - show when informative (>30 or non-standard)
+    let frameRateBadge = '';
+    const frameRate = variant.frameRate || '';
+    if (frameRate) {
+      const fps = parseFloat(frameRate);
+      const isStandard = fps === 24 || fps === 25 || fps === 30;
+      const isHighOrNonStandard = fps > 30 || (!isStandard && fps > 0);
+      if (isHighOrNonStandard) {
+        frameRateBadge = `<span class="item-frame-rate" title="Frame rate: ${escHtml(frameRate)}">${escHtml(frameRate)}</span>`;
+      }
+    }
+    
+    // Audio languages for variant - compact badges
+    let languageBadges = '';
+    const audioLanguages = variant.audioLanguages || [];
+    if (audioLanguages.length > 0) {
+      const langCodes = audioLanguages.slice(0, 2).map(lang => lang.toUpperCase().slice(0, 2));
+      const extraCount = audioLanguages.length - 2;
+      const langText = extraCount > 0 ? `${langCodes[0]} +${extraCount}` : langCodes.join(' ');
+      const fullLangs = audioLanguages.map(l => getLanguageName(l) || l).join(', ');
+      languageBadges = `<span class="item-languages" title="Languages: ${escHtml(fullLangs)}">${escHtml(langText)}</span>`;
+    }
+
+    return `
+      <div class="variant-row" data-variant-index="${index}" tabindex="0" role="listitem">
+        <input type="radio" class="item-selector" name="variant-select-${streamUrlHash}" value="${index}" data-variant-index="${index}" tabindex="-1">
+        <span class="item-name">${escHtml(variant.name)}</span>
+        ${variantQuality ? `<span class="item-quality">${escHtml(variantQuality)}</span>` : ''}
+        ${variantMeta ? `<span class="item-meta">${escHtml(variantMeta)}</span>` : ''}
+        ${variantCodecs ? `<span class="item-codecs">${escHtml(variantCodecs)}</span>` : ''}
+        ${audioCodecBadge}
+        ${frameRateBadge}
+        ${languageBadges}
+        ${estimatedSize ? `<span class="item-size">${escHtml(estimatedSize)}</span>` : ''}
+      </div>
+    `;
+  }
+
+  // Empty state messages per section
+  const SECTION_EMPTY_MESSAGES = {
+    'streams': {
+      icon: '📡',
+      text: 'No streams detected yet.',
+      hint: 'Play a video to see HLS/DASH streams.'
+    },
+    'video-files': {
+      icon: '📼',
+      text: 'No video files detected yet.',
+      hint: 'Play a video to see direct video files.'
+    },
+    'subtitles': {
+      icon: '📄',
+      text: 'No subtitles detected yet.',
+      hint: 'Play a video with captions to see subtitle files.'
+    }
+  };
+
   function createSections() {
     // Clear existing sections first
-    container.querySelectorAll('.section-header').forEach(h => h.remove());
+    container.querySelectorAll('.section-header, .section-empty-state').forEach(h => h.remove());
     btnSelectAllSection = null;
-    
+
     // Create Streams section
     streamsSection = document.createElement('div');
     streamsSection.className = 'section-header';
     streamsSection.dataset.section = 'streams';
-    streamsSection.innerHTML = '<span class="section-header-icon">📡</span> Streams';
+    streamsSection.innerHTML = `
+      <div class="section-header-left">
+        <span class="section-header-icon">📡</span> Streams
+      </div>
+    `;
     streamsSection.style.display = 'none';
     container.appendChild(streamsSection);
     
+    // Create empty state for streams
+    const streamsEmptyState = createEmptyStateElement('streams');
+    streamsSection.after(streamsEmptyState);
+
     // Create Video Files section
     videoFilesSection = document.createElement('div');
     videoFilesSection.className = 'section-header';
     videoFilesSection.dataset.section = 'video-files';
-    videoFilesSection.innerHTML = '<span class="section-header-icon">📼</span> Video Files';
+    videoFilesSection.innerHTML = `
+      <div class="section-header-left">
+        <span class="section-header-icon">📼</span> Video Files
+      </div>
+    `;
     videoFilesSection.style.display = 'none';
     container.appendChild(videoFilesSection);
     
+    // Create empty state for video files
+    const videoFilesEmptyState = createEmptyStateElement('video-files');
+    videoFilesSection.after(videoFilesEmptyState);
+
     // Create Subtitles section with select all button
     subtitlesSection = document.createElement('div');
     subtitlesSection.className = 'section-header';
     subtitlesSection.dataset.section = 'subtitles';
     subtitlesSection.style.display = 'none';
-    
+
     // Create section header with select all button
     const headerContent = document.createElement('div');
     headerContent.className = 'section-header-content';
-    
+
     const titleSpan = document.createElement('span');
     titleSpan.innerHTML = '<span class="section-header-icon">📄</span> Subtitles';
-    
+
     btnSelectAllSection = document.createElement('button');
     btnSelectAllSection.className = 'btn-select-all-section';
     btnSelectAllSection.textContent = 'Select all';
     btnSelectAllSection.addEventListener('click', handleSelectAllClick);
-    
+
     headerContent.appendChild(titleSpan);
     headerContent.appendChild(btnSelectAllSection);
     subtitlesSection.appendChild(headerContent);
-    
+
     container.appendChild(subtitlesSection);
+    
+    // Create empty state for subtitles
+    const subtitlesEmptyState = createEmptyStateElement('subtitles');
+    subtitlesSection.after(subtitlesEmptyState);
+  }
+  
+  function createEmptyStateElement(sectionName) {
+    const emptyState = document.createElement('div');
+    emptyState.className = 'section-empty-state';
+    emptyState.dataset.sectionEmpty = sectionName;
+    emptyState.style.display = 'none';
+    
+    const messages = SECTION_EMPTY_MESSAGES[sectionName];
+    emptyState.innerHTML = `
+      <div class="section-empty-state-icon">${messages.icon}</div>
+      <div class="section-empty-state-text">${messages.text}</div>
+      <div class="section-empty-state-hint">${messages.hint}</div>
+    `;
+    
+    return emptyState;
+  }
+  
+  function updateSectionEmptyStates() {
+    // Check each section and show/hide empty state
+    ['streams', 'video-files', 'subtitles'].forEach(sectionName => {
+      const sectionHeader = container.querySelector(`.section-header[data-section="${sectionName}"]`);
+      const emptyState = container.querySelector(`.section-empty-state[data-section-empty="${sectionName}"]`);
+      
+      if (!sectionHeader || !emptyState) return;
+      
+      // Check if section has any visible items
+      const sectionVisible = sectionHeader.style.display !== 'none';
+      let hasItems = false;
+      
+      if (sectionVisible) {
+        // Look for items after the section header until the next section header or empty state
+        let sibling = sectionHeader.nextElementSibling;
+        while (sibling && !sibling.classList.contains('section-header') && !sibling.classList.contains('section-empty-state')) {
+          if (sibling.classList.contains('list-item-wrapper') && sibling.style.display !== 'none') {
+            hasItems = true;
+            break;
+          }
+          sibling = sibling.nextElementSibling;
+        }
+      }
+      
+      // Show empty state if section is visible but has no items
+      if (sectionVisible && !hasItems) {
+        emptyState.style.display = 'block';
+      } else {
+        emptyState.style.display = 'none';
+      }
+    });
   }
 
   function showSection(sectionName) {
@@ -572,7 +884,7 @@ function initTheme() {
    * @returns {boolean} True if duplicate exists
    */
   function checkDuplicate(uniqueId) {
-    return !!container.querySelector(`[data-id="${CSS.escape(uniqueId)}"]`);
+    return !!container.querySelector(`.list-item-wrapper[data-id="${CSS.escape(uniqueId)}"], .sub-card[data-id="${CSS.escape(uniqueId)}"]`);
   }
 
   /**
@@ -611,6 +923,112 @@ function initTheme() {
     } else {
       container.appendChild(card);
     }
+  }
+
+  /**
+   * Builds a compact list item HTML
+   * @param {Object} options - The item options
+   * @param {string} options.kind - Item kind (stream, subtitle, video-file)
+   * @param {string} options.id - Unique ID
+   * @param {string} options.url - Item URL
+   * @param {string} options.name - Item name
+   * @param {string} options.format - Format badge text
+   * @param {string} options.badgeClass - Badge CSS class (e.g., 'badge-hls', 'badge-vtt')
+   * @param {string} options.inputType - Type of input (radio or checkbox)
+   * @param {string} options.inputName - Name attribute for radio inputs
+   * @param {string} options.inputValue - Value attribute for the input
+   * @param {string} options.inputDataAttr - Data attribute name for the input
+   * @param {string} options.quality - Quality text (e.g., '1080p')
+   * @param {string} options.meta - Additional meta text (e.g., 'HDR')
+   * @param {string} options.size - Size text (e.g., '3.2GB')
+   * @param {string} options.time - Time text (e.g., '2m')
+   * @param {boolean} options.hasVariants - Whether this item has variants
+   * @param {string} options.audioCodec - Audio codec (e.g., "Opus", "AC3") - shown when non-AAC
+   * @param {string} options.frameRate - Frame rate (e.g., "60fps") - shown when >30 or non-standard
+   * @param {string[]} options.audioLanguages - Array of language codes (e.g., ["en", "ja"])
+   * @param {boolean} options.hasActions - Whether to show kebab menu for actions
+   * @returns {string} HTML string for list item
+   */
+  function buildListItemHtml(options) {
+    const {
+      kind,
+      id,
+      url,
+      name,
+      format,
+      badgeClass = '',
+      inputType,
+      inputName,
+      inputValue,
+      inputDataAttr,
+      quality = '',
+      meta = '',
+      size = '',
+      duration = '',
+      time = '',
+      hasVariants = false,
+      audioCodec = '',
+      frameRate = '',
+      audioLanguages = [],
+      hasActions = false
+    } = options;
+
+    const inputNameAttr = inputName ? ` name="${inputName}"` : '';
+    const expandButton = hasVariants ? `<button class="btn-expand" data-action="expand" aria-label="Show variants" tabindex="-1">▼</button>` : '';
+    
+    // Build audio codec badge - show only if non-AAC and non-empty
+    const audioCodecBadge = audioCodec && !audioCodec.toLowerCase().includes('aac')
+      ? `<span class="item-audio-codec" title="Audio: ${escHtml(audioCodec)}">${escHtml(audioCodec)}</span>`
+      : '';
+    
+    // Build frame rate badge - show only when informative (>30 or non-standard)
+    let frameRateBadge = '';
+    if (frameRate) {
+      const fps = parseFloat(frameRate);
+      // Show if >30, or non-standard values like 23.976, 59.94
+      const isStandard = fps === 24 || fps === 25 || fps === 30;
+      const isHighOrNonStandard = fps > 30 || (!isStandard && fps > 0);
+      if (isHighOrNonStandard) {
+        frameRateBadge = `<span class="item-frame-rate" title="Frame rate: ${escHtml(frameRate)}">${escHtml(frameRate)}</span>`;
+      }
+    }
+    
+    // Build compact language badges (e.g., "EN", "JA", "EN +2")
+    let languageBadges = '';
+    if (audioLanguages && audioLanguages.length > 0) {
+      const langCodes = audioLanguages.slice(0, 2).map(lang => lang.toUpperCase().slice(0, 2));
+      const extraCount = audioLanguages.length - 2;
+      const langText = extraCount > 0 ? `${langCodes[0]} +${extraCount}` : langCodes.join(' ');
+      const fullLangs = audioLanguages.map(l => getLanguageName(l) || l).join(', ');
+      languageBadges = `<span class="item-languages" title="Languages: ${escHtml(fullLangs)}">${escHtml(langText)}</span>`;
+    }
+    
+    // Build kebab menu button for actions
+    const kebabMenu = hasActions
+      ? `<button class="btn-kebab" data-action="kebab" aria-label="Actions" tabindex="-1">⋮</button>`
+      : '';
+
+    // Build action buttons group (kebab + expand together at rightmost)
+    const actionButtons = (kebabMenu || expandButton)
+      ? `<span class="item-actions">${kebabMenu}${expandButton}</span>`
+      : '';
+
+    return `
+      <div class="list-item" data-kind="${kind}" data-id="${id}" data-url="${escHtml(url)}" ${inputDataAttr}="${escHtml(inputValue)}" tabindex="0" role="listitem">
+        <input type="${inputType}" class="item-selector"${inputNameAttr} value="${escHtml(inputValue)}" ${inputDataAttr}="${escHtml(inputValue)}" tabindex="-1">
+        <span class="badge-format ${badgeClass}">${escHtml(format || '?')}</span>
+        <span class="item-name" title="${escHtml(name)}">${escHtml(name)}</span>
+        ${quality ? `<span class="item-quality">${escHtml(quality)}</span>` : ''}
+        ${meta ? `<span class="item-meta">${escHtml(meta)}</span>` : ''}
+        ${audioCodecBadge}
+        ${frameRateBadge}
+        ${languageBadges}
+        ${duration ? `<span class="item-duration">${escHtml(duration)}</span>` : ''}
+        ${size ? `<span class="item-size">${escHtml(size)}</span>` : ''}
+        ${time ? `<span class="item-time">${escHtml(time)}</span>` : ''}
+        ${actionButtons}
+      </div>
+    `;
   }
 
   /**
@@ -720,128 +1138,206 @@ function initTheme() {
 
     showCardContainer();
 
-    const card = createBaseCard(uniqueId, timestamp, 'stream');
-    card.dataset.streamUrl = item.url;
+    // Determine badge class based on format
+    const format = item.format?.toUpperCase() || '?';
+    let badgeClass = 'badge-hls';
+    if (format === 'DASH') badgeClass = 'badge-dash';
+    else if (format === 'M3U8') badgeClass = 'badge-hls';
 
-    const sizeTxt = formatSize(item.size);
-    const metaParts = [item.format?.toUpperCase()];
+    // Build quality text
+    const quality = item.resolution || item.quality || '';
 
-    // Add resolution/quality for streams
-    if (item.resolution) metaParts.push(item.resolution);
-    if (item.quality && !item.resolution) metaParts.push(item.quality);
-    if (item.codec) metaParts.push(item.codec);
-    if (item.bitrate) metaParts.push(item.bitrate);
+    // Build meta text (HDR, codec, etc.)
+    const metaParts = [];
     if (item.hdr) metaParts.push('HDR');
-    if (item.estimatedQuality) metaParts.push(`~${item.estimatedQuality}`);
+    if (item.codec && !quality) metaParts.push(item.codec);
+    const meta = metaParts.join(' · ');
 
-    // Add duration for HLS streams
-    if (item.durationFormatted) metaParts.push(item.durationFormatted);
+    // Size, duration and time
+    const sizeTxt = formatSize(item.size);
+    const timeTxt = timeAgo(item.timestamp);
+    const durationTxt = item.durationFormatted || '';
 
-    // Add variant count for master playlists
-    if (item.isMasterPlaylist && item.variants) {
-      metaParts.push(`${item.variants.length} quality options`);
+    // Check if has variants
+    const hasVariants = item.isMasterPlaylist && item.variants && item.variants.length > 0;
+    const variantCount = hasVariants ? item.variants.length : 0;
+
+    // Extract audio codec - from top-level or first variant
+    let audioCodec = item.audioCodec || '';
+    if (!audioCodec && hasVariants && item.variants[0]?.audioCodec) {
+      audioCodec = item.variants[0].audioCodec;
     }
 
-    // Add size and time
-    if (sizeTxt) metaParts.push(sizeTxt);
-    metaParts.push(timeAgo(item.timestamp));
+    // Extract frame rate - from top-level or first variant
+    let frameRate = item.frameRate || '';
+    if (!frameRate && hasVariants && item.variants[0]?.frameRate) {
+      frameRate = item.variants[0].frameRate;
+    }
 
-    const meta = metaParts.filter(Boolean).join(' · ');
+    // Extract audio languages - from top-level or first variant
+    let audioLanguages = item.audioLanguages || [];
+    if ((!audioLanguages || audioLanguages.length === 0) && hasVariants && item.variants[0]?.audioLanguages) {
+      audioLanguages = item.variants[0].audioLanguages;
+    }
 
-    card.innerHTML = buildCardMainHtml(item, meta, '#FF6B35', 'radio', 'stream-select', item.url, 'data-stream-id', true);
+    // Create list item using new compact layout
+    const listItemHtml = buildListItemHtml({
+      kind: 'stream',
+      id: uniqueId,
+      url: item.url,
+      name: item.name,
+      format: format,
+      badgeClass: badgeClass,
+      inputType: 'radio',
+      inputName: 'stream-select',
+      inputValue: item.url,
+      inputDataAttr: 'data-stream-id',
+      quality: quality,
+      meta: meta,
+      size: sizeTxt,
+      duration: durationTxt,
+      time: timeTxt,
+      hasVariants: hasVariants,
+      audioCodec: audioCodec,
+      frameRate: frameRate,
+      audioLanguages: audioLanguages,
+      hasActions: true
+    });
 
-    // Add variant subitems if this is a master playlist
-    if (item.isMasterPlaylist && item.variants && item.variants.length > 0) {
-      const variantsContainer = document.createElement('div');
-      variantsContainer.className = 'variants-container';
+    // Create a container for the list item and potential variants
+    const wrapper = document.createElement('div');
+    wrapper.className = 'list-item-wrapper';
+    wrapper.dataset.id = uniqueId;
+    wrapper.innerHTML = listItemHtml;
+
+    const listItem = wrapper.querySelector('.list-item');
+    listItem.dataset.streamUrl = item.url;
+    listItem.dataset.timestamp = timestamp;
+
+    // Add variant count badge to stream row if has variants
+    if (hasVariants) {
+      const variantCountBadge = document.createElement('span');
+      variantCountBadge.className = 'variant-count';
+      variantCountBadge.textContent = `${variantCount} variant${variantCount !== 1 ? 's' : ''}`;
+      variantCountBadge.dataset.variantCount = 'true';
       
-      const variantsToggle = document.createElement('button');
-      variantsToggle.className = 'variants-toggle';
-      variantsToggle.innerHTML = `
-        <span class="variants-toggle-icon">▼</span>
-        <span>${item.variants.length} qualities</span>
-      `;
-      
-      const variantsList = document.createElement('div');
-      variantsList.className = 'variants-list';
-      
-      // Create variant subitems
+      // Insert before the action buttons group (kebab + expand)
+      const actionButtons = listItem.querySelector('.item-actions');
+      if (actionButtons) {
+        actionButtons.before(variantCountBadge);
+      }
+    }
+
+    // Add variant rows if this is a master playlist
+    if (hasVariants) {
+      // Create variant rows inline (not in a separate container)
       item.variants.forEach((variant, index) => {
-        const variantItem = document.createElement('div');
-        variantItem.className = 'variant-subitem';
-        variantItem.dataset.variantIndex = index;
+        const variantRowHtml = buildVariantRowHtml(variant, index, urlHash);
+        const variantRowWrapper = document.createElement('div');
+        variantRowWrapper.innerHTML = variantRowHtml;
+        const variantRow = variantRowWrapper.firstElementChild;
         
-        // Use pre-calculated estimated size from service worker
-        const estimatedSize = variant.estimatedSizeFormatted || '';
+        // Initially hidden
+        variantRow.style.display = 'none';
+        variantRow.classList.add('variant-inline');
         
-        const detailsParts = [];
-        if (variant.resolution) detailsParts.push(`<span class="variant-detail-item">📐 ${variant.resolution}</span>`);
-        if (variant.bitrate) detailsParts.push(`<span class="variant-detail-item">📊 ${variant.bitrate}</span>`);
-        if (variant.codec) detailsParts.push(`<span class="variant-detail-item">🎬 ${variant.codec}</span>`);
-        
-        variantItem.innerHTML = `
-          <div class="variant-selector">
-            <input type="radio" name="variant-select-${urlHash}" value="${index}" data-variant-index="${index}">
-          </div>
-          <div class="variant-info">
-            <div class="variant-name">${escHtml(variant.name)}</div>
-            <div class="variant-details">${detailsParts.join('')}</div>
-          </div>
-          ${estimatedSize ? `<div class="variant-estimated-size">${escHtml(estimatedSize)}</div>` : ''}
-        `;
-        
+        // Store variant data for selection
+        variantRow.dataset.variantUrl = variant.url;
+        variantRow.dataset.variantName = variant.name;
+
         // Variant selection handler
-        const variantRadio = variantItem.querySelector('input[type="radio"]');
+        const variantRadio = variantRow.querySelector('input[type="radio"]');
         variantRadio.addEventListener('change', () => {
           if (variantRadio.checked) {
             // Update visual selection
-            variantsList.querySelectorAll('.variant-subitem').forEach(v => v.classList.remove('selected'));
-            variantItem.classList.add('selected');
-            
+            wrapper.querySelectorAll('.variant-row').forEach(v => v.classList.remove('selected'));
+            variantRow.classList.add('selected');
+
             // Store selected variant
             selectedVariants.set(item.url, {
               index: index,
               variant: variant
             });
-            
+
             // Also select the parent stream
-            const parentRadio = card.querySelector('input[type="radio"][name="stream-select"]');
+            const parentRadio = listItem.querySelector('input[type="radio"]');
             if (parentRadio && !parentRadio.checked) {
               parentRadio.checked = true;
               parentRadio.dispatchEvent(new Event('change'));
             }
-            
+
             updateCommandBar();
           }
         });
-        
-        variantsList.appendChild(variantItem);
+
+        // Click on variant row to select radio
+        variantRow.addEventListener('click', (e) => {
+          if (e.target.tagName !== 'INPUT') {
+            variantRadio.checked = true;
+            variantRadio.dispatchEvent(new Event('change'));
+          }
+        });
+
+        wrapper.appendChild(variantRow);
       });
-      
+
       // Toggle expand/collapse
-      variantsToggle.addEventListener('click', () => {
-        const isExpanded = variantsList.classList.toggle('expanded');
-        variantsToggle.classList.toggle('expanded', isExpanded);
-      });
-      
-      variantsContainer.appendChild(variantsToggle);
-      variantsContainer.appendChild(variantsList);
-      card.appendChild(variantsContainer);
+      const expandBtn = listItem.querySelector('.btn-expand');
+      if (expandBtn) {
+        expandBtn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          const isExpanded = expandBtn.classList.contains('expanded');
+          
+          // Toggle expand button state
+          expandBtn.classList.toggle('expanded', !isExpanded);
+          
+          // Show/hide variant rows
+          const variantRows = wrapper.querySelectorAll('.variant-row.variant-inline');
+          variantRows.forEach(row => {
+            row.style.display = isExpanded ? 'none' : 'flex';
+          });
+          
+          // Show/hide variant count badge
+          const variantCountBadge = listItem.querySelector('.variant-count');
+          if (variantCountBadge) {
+            variantCountBadge.style.display = isExpanded ? 'inline' : 'none';
+          }
+        });
+      }
     }
 
-    // Attach event handlers
-    attachCardEventHandlers(card, item, {
-      showCopyButton: true,
-      onRadioChange: (cardEl, radioEl) => {
-        selectedStreamId = cardEl.dataset.streamUrl;
-        // Update visual selection
-        container.querySelectorAll('.sub-card[data-kind="stream"]').forEach(c => c.classList.remove('selected-stream'));
-        cardEl.classList.add('selected-stream');
+    // Radio button change handler
+    const radio = listItem.querySelector('input[type="radio"]');
+    radio.addEventListener('change', () => {
+      if (radio.checked) {
+        // Remove .selected class from all stream and video-file items
+        container.querySelectorAll('.list-item[data-kind="stream"], .list-item[data-kind="video-file"]').forEach(c => c.classList.remove('selected'));
+        // Add .selected class to this item
+        listItem.classList.add('selected');
+        // Update selected stream ID
+        selectedStreamId = item.url;
         updateCommandBar();
       }
     });
 
-    insertCardAfterSection(card, 'streams');
+    // Click on list item to select radio
+    listItem.addEventListener('click', (e) => {
+      if (e.target.tagName !== 'INPUT' && e.target.tagName !== 'BUTTON' && !e.target.classList.contains('variant-count')) {
+        radio.checked = true;
+        radio.dispatchEvent(new Event('change'));
+      }
+    });
+
+    // Kebab menu click handler
+    const kebabBtn = listItem.querySelector('.btn-kebab');
+    if (kebabBtn) {
+      kebabBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        showKebabMenu(kebabBtn, item, 'stream');
+      });
+    }
+
+    insertCardAfterSection(wrapper, 'streams');
   }
 
   function appendVideoFileCard(id, item) {
@@ -854,44 +1350,73 @@ function initTheme() {
 
     showCardContainer();
 
-    const card = createBaseCard(uniqueId, timestamp, 'video-file');
+    // Build quality text
+    const quality = item.resolution || item.quality || '';
 
+    // Size and time
     const sizeTxt = formatSize(item.size);
-    const metaParts = [item.format?.toUpperCase()];
+    const timeTxt = timeAgo(item.timestamp);
 
-    if (item.resolution) metaParts.push(item.resolution);
-    if (item.quality && !item.resolution) metaParts.push(item.quality);
-
-    if (sizeTxt) metaParts.push(sizeTxt);
-    metaParts.push(timeAgo(item.timestamp));
-
-    const meta = metaParts.filter(Boolean).join(' · ');
-
-    card.innerHTML = buildCardMainHtml(item, meta, '#10B981', 'radio', 'stream-select', timestamp, 'data-stream-id', true) + `
-      <div class="card-actions">
-        <button class="action-btn btn-direct-download" data-action="direct-download">
-          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
-            <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>
-          </svg>
-          Download
-        </button>
-      </div>
-    `;
-
-    // Attach event handlers
-    attachCardEventHandlers(card, item, {
-      showCopyButton: true,
-      onRadioChange: (cardEl) => {
-        selectedStreamId = String(timestamp);
-        // Update visual selection
-        container.querySelectorAll('.sub-card[data-kind="stream"], .sub-card[data-kind="video-file"]').forEach(c => c.classList.remove('selected-stream'));
-        cardEl.classList.add('selected-stream');
-        updateCommandBar();
-      },
-      onDirectDownload: true
+    // Create list item using new compact layout
+    const listItemHtml = buildListItemHtml({
+      kind: 'video-file',
+      id: uniqueId,
+      url: item.url,
+      name: item.name,
+      format: item.format?.toUpperCase() || 'MP4',
+      badgeClass: 'badge-mp4',
+      inputType: 'radio',
+      inputName: 'stream-select',
+      inputValue: String(timestamp),
+      inputDataAttr: 'data-stream-id',
+      quality: quality,
+      size: sizeTxt,
+      time: timeTxt,
+      hasVariants: false,
+      hasActions: true
     });
 
-    insertCardAfterSection(card, 'video-files');
+    // Create wrapper
+    const wrapper = document.createElement('div');
+    wrapper.className = 'list-item-wrapper';
+    wrapper.dataset.id = uniqueId;
+    wrapper.innerHTML = listItemHtml;
+
+    const listItem = wrapper.querySelector('.list-item');
+    listItem.dataset.timestamp = timestamp;
+
+    // Radio button change handler
+    const radio = listItem.querySelector('input[type="radio"]');
+    radio.addEventListener('change', () => {
+      if (radio.checked) {
+        // Remove .selected class from all stream and video-file items
+        container.querySelectorAll('.list-item[data-kind="stream"], .list-item[data-kind="video-file"]').forEach(c => c.classList.remove('selected'));
+        // Add .selected class to this item
+        listItem.classList.add('selected');
+        // Update selected stream ID
+        selectedStreamId = String(timestamp);
+        updateCommandBar();
+      }
+    });
+
+    // Click on list item to select radio
+    listItem.addEventListener('click', (e) => {
+      if (e.target.tagName !== 'INPUT' && e.target.tagName !== 'BUTTON') {
+        radio.checked = true;
+        radio.dispatchEvent(new Event('change'));
+      }
+    });
+
+    // Kebab menu click handler
+    const kebabBtn = listItem.querySelector('.btn-kebab');
+    if (kebabBtn) {
+      kebabBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        showKebabMenu(kebabBtn, item, 'video-file');
+      });
+    }
+
+    insertCardAfterSection(wrapper, 'video-files');
   }
 
   function appendSubtitleCard(id, item) {
@@ -904,42 +1429,81 @@ function initTheme() {
 
     showCardContainer();
 
-    const card = createBaseCard(uniqueId, timestamp, 'subtitle');
-    card.dataset.subtitleUrl = item.url;
+    // Determine badge class based on format
+    const format = item.format?.toUpperCase() || '?';
+    let badgeClass = 'badge-vtt';
+    if (format === 'SRT') badgeClass = 'badge-srt';
+    else if (format === 'ASS' || format === 'SSA') badgeClass = 'badge-ass';
+    else if (format === 'VTT') badgeClass = 'badge-vtt';
 
+    // Size and time
     const sizeTxt = formatSize(item.size);
-    const metaParts = [item.format?.toUpperCase()];
+    const timeTxt = timeAgo(item.timestamp);
 
-    if (sizeTxt) metaParts.push(sizeTxt);
-    metaParts.push(timeAgo(item.timestamp));
+    // Create list item using new compact layout
+    const listItemHtml = buildListItemHtml({
+      kind: 'subtitle',
+      id: uniqueId,
+      url: item.url,
+      name: item.name,
+      format: format,
+      badgeClass: badgeClass,
+      inputType: 'checkbox',
+      inputName: null,
+      inputValue: timestamp,
+      inputDataAttr: 'data-sub-id',
+      size: sizeTxt,
+      time: timeTxt,
+      hasVariants: false,
+      hasActions: true
+    });
 
-    const meta = metaParts.filter(Boolean).join(' · ');
+    // Create wrapper
+    const wrapper = document.createElement('div');
+    wrapper.className = 'list-item-wrapper';
+    wrapper.dataset.id = uniqueId;
+    wrapper.innerHTML = listItemHtml;
 
-    card.innerHTML = buildCardMainHtml(item, meta, '#0077FF', 'checkbox', null, timestamp, 'data-sub-id', false) + `
-      <div class="card-actions">
-        <a class="action-btn btn-download" href="${escHtml(item.url)}" download="${escHtml(item.name)}" target="_blank">
-          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
-            <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>
-          </svg>
-          Download
-        </a>
-      </div>
-    `;
+    const listItem = wrapper.querySelector('.list-item');
+    listItem.dataset.subtitleUrl = item.url;
+    listItem.dataset.timestamp = timestamp;
 
-    // Attach event handlers
-    attachCardEventHandlers(card, item, {
-      onCheckboxChange: () => {
-        updateSelectAllButton();
-        updateCommandBar();
+    // Checkbox change handler
+    const checkbox = listItem.querySelector('input[type="checkbox"]');
+    checkbox.addEventListener('change', () => {
+      // Update visual selection state
+      if (checkbox.checked) {
+        listItem.classList.add('selected');
+      } else {
+        listItem.classList.remove('selected');
+      }
+      updateSelectAllButton();
+      updateCommandBar();
+    });
+
+    // Click on list item to toggle checkbox
+    listItem.addEventListener('click', (e) => {
+      if (e.target.tagName !== 'INPUT' && e.target.tagName !== 'BUTTON') {
+        checkbox.checked = !checkbox.checked;
+        checkbox.dispatchEvent(new Event('change'));
       }
     });
 
+    // Kebab menu click handler
+    const kebabBtn = listItem.querySelector('.btn-kebab');
+    if (kebabBtn) {
+      kebabBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        showKebabMenu(kebabBtn, item, 'subtitle');
+      });
+    }
+
     // Add language detection for subtitles
     const langBadge = document.createElement('span');
-    langBadge.className = 'badge-language';
-    langBadge.style.cssText = 'background: #28a745; color: #fff; font-size: 9px; font-weight: 600; padding: 2px 5px; border-radius: 4px; margin-left: 6px; text-transform: uppercase; opacity: 0; transition: opacity 0.2s;';
-    langBadge.textContent = '...';
-    card.querySelector('.card-info').appendChild(langBadge);
+    langBadge.className = 'badge-language loading';
+    langBadge.style.cssText = 'background: #28a745; color: #fff; font-size: 9px; font-weight: 600; padding: 2px 5px; border-radius: 4px; margin-left: 6px; text-transform: uppercase; opacity: 1; transition: opacity 0.2s; flex-shrink: 0;';
+    langBadge.textContent = '';
+    listItem.querySelector('.item-name').after(langBadge);
 
     // Detect language asynchronously
     detectSubtitleLanguage(item.url, item.headers).then(langCode => {
@@ -947,6 +1511,7 @@ function initTheme() {
         const langName = getLanguageName(langCode);
         langBadge.textContent = langName || langCode.toUpperCase();
         langBadge.title = `Detected language: ${langName || langCode}`;
+        langBadge.classList.remove('loading');
         langBadge.style.opacity = '1';
         // Store the detected language code for use when building ffmpeg command
         subtitleLanguageCache.set(item.url, langCode);
@@ -957,7 +1522,7 @@ function initTheme() {
       langBadge.remove();
     });
 
-    insertCardAfterSection(card, 'subtitles');
+    insertCardAfterSection(wrapper, 'subtitles');
     updateSelectAllButton();
   }
 
@@ -971,6 +1536,341 @@ function initTheme() {
     toastTimer = setTimeout(() => {
       toast.classList.remove('show');
     }, 2000);
+  }
+
+  // ── Keyboard Navigation ───────────────────────────────────
+  let focusedItemIndex = -1;
+  let focusableItems = [];
+  
+  function initKeyboardNavigation() {
+    // Add keyboard event listener to container
+    container.addEventListener('keydown', handleKeyboardNavigation);
+    
+    // Also listen on document for Escape key
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') {
+        handleEscapeKey();
+      }
+    });
+    
+    // Update focusable items when DOM changes
+    const observer = new MutationObserver(() => {
+      updateFocusableItems();
+    });
+    observer.observe(container, { childList: true, subtree: true });
+  }
+  
+  function updateFocusableItems() {
+    // Get all list items and variant rows that are visible
+    focusableItems = Array.from(container.querySelectorAll('.list-item, .variant-row:not([style*="display: none"])'));
+  }
+  
+  function handleKeyboardNavigation(e) {
+    // Only handle if we're inside the list container
+    if (!container.contains(e.target)) return;
+    
+    const isListItem = e.target.classList.contains('list-item') || 
+                       e.target.classList.contains('variant-row');
+    
+    switch (e.key) {
+      case 'ArrowDown':
+        e.preventDefault();
+        navigateToNextItem();
+        break;
+      case 'ArrowUp':
+        e.preventDefault();
+        navigateToPreviousItem();
+        break;
+      case 'Enter':
+        if (isListItem) {
+          e.preventDefault();
+          activateItem(e.target);
+        }
+        break;
+      case ' ':
+        if (isListItem) {
+          e.preventDefault();
+          activateItem(e.target);
+        }
+        break;
+    }
+  }
+  
+  function navigateToNextItem() {
+    updateFocusableItems();
+    if (focusableItems.length === 0) return;
+    
+    focusedItemIndex++;
+    if (focusedItemIndex >= focusableItems.length) {
+      focusedItemIndex = 0; // Wrap around
+    }
+    
+    focusItem(focusableItems[focusedItemIndex]);
+  }
+  
+  function navigateToPreviousItem() {
+    updateFocusableItems();
+    if (focusableItems.length === 0) return;
+    
+    focusedItemIndex--;
+    if (focusedItemIndex < 0) {
+      focusedItemIndex = focusableItems.length - 1; // Wrap around
+    }
+    
+    focusItem(focusableItems[focusedItemIndex]);
+  }
+  
+  function focusItem(item) {
+    // Remove keyboard-focus class from all items
+    container.querySelectorAll('.keyboard-focus').forEach(el => {
+      el.classList.remove('keyboard-focus');
+    });
+    
+    // Add keyboard-focus class and focus
+    item.classList.add('keyboard-focus');
+    item.focus();
+    
+    // Scroll into view if needed
+    item.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+  }
+  
+  function activateItem(item) {
+    const input = item.querySelector('input[type="radio"], input[type="checkbox"]');
+    if (input) {
+      if (input.type === 'radio') {
+        input.checked = true;
+        input.dispatchEvent(new Event('change'));
+      } else if (input.type === 'checkbox') {
+        input.checked = !input.checked;
+        input.dispatchEvent(new Event('change'));
+      }
+    }
+  }
+  
+  function handleEscapeKey() {
+    // Clear stream selection
+    if (selectedStreamId) {
+      selectedStreamId = null;
+      
+      // Uncheck all radio buttons
+      container.querySelectorAll('input[type="radio"]').forEach(radio => {
+        radio.checked = false;
+      });
+      
+      // Remove selected class from all items
+      container.querySelectorAll('.list-item.selected, .list-item.selected-stream').forEach(item => {
+        item.classList.remove('selected', 'selected-stream');
+      });
+      
+      // Clear variant selections
+      selectedVariants.clear();
+      container.querySelectorAll('.variant-row.selected').forEach(row => {
+        row.classList.remove('selected');
+      });
+      
+      updateCommandBar();
+      showToast('Selection cleared');
+    }
+    
+    // Also uncheck all checkboxes
+    const checkedBoxes = container.querySelectorAll('.list-item[data-kind="subtitle"] input[type="checkbox"]:checked');
+    if (checkedBoxes.length > 0) {
+      checkedBoxes.forEach(cb => {
+        cb.checked = false;
+        cb.dispatchEvent(new Event('change'));
+      });
+    }
+  }
+  
+  // ── Loading State Management ───────────────────────────────
+  function setButtonLoading(button, isLoading) {
+    if (isLoading) {
+      button.classList.add('loading');
+      button.disabled = true;
+    } else {
+      button.classList.remove('loading');
+      button.disabled = false;
+    }
+  }
+  
+  function setLanguageBadgeLoading(badge, isLoading) {
+    if (isLoading) {
+      badge.classList.add('loading');
+      badge.textContent = '';
+    } else {
+      badge.classList.remove('loading');
+    }
+  }
+
+  // ── Kebab Menu Dropdown ───────────────────────────────────
+  let activeDropdown = null;
+  
+  /**
+   * Creates and shows a kebab menu dropdown
+   * @param {HTMLElement} button - The kebab button that was clicked
+   * @param {Object} item - The item data (url, name, etc.)
+   * @param {string} itemType - The type of item ('stream', 'video-file', 'subtitle')
+   */
+  function showKebabMenu(button, item, itemType) {
+    // Close any existing dropdown
+    closeKebabMenu();
+    
+    // Create dropdown element
+    const dropdown = document.createElement('div');
+    dropdown.className = 'kebab-dropdown';
+    dropdown.setAttribute('role', 'menu');
+    
+    // Build menu items based on item type
+    const menuItems = [];
+    
+    // All items get Download
+    menuItems.push({
+      action: 'download',
+      label: 'Download',
+      icon: '⬇️'
+    });
+    
+    // Streams and video files get Copy cURL option
+    if (itemType === 'stream' || itemType === 'video-file') {
+      menuItems.push({
+        action: 'curl',
+        label: 'Copy cURL',
+        icon: '📋'
+      });
+    }
+    
+    // All items get Copy URL
+    menuItems.push({
+      action: 'copy',
+      label: 'Copy URL',
+      icon: '🔗'
+    });
+    
+    // Build dropdown HTML
+    dropdown.innerHTML = menuItems.map(mi => `
+      <button class="kebab-dropdown-item" data-action="${mi.action}" role="menuitem">
+        <span class="kebab-dropdown-icon">${mi.icon}</span>
+        <span class="kebab-dropdown-label">${escHtml(mi.label)}</span>
+      </button>
+    `).join('');
+    
+    // Position dropdown below the button
+    const rect = button.getBoundingClientRect();
+    dropdown.style.position = 'fixed';
+    dropdown.style.top = `${rect.bottom + 4}px`;
+    dropdown.style.right = `${window.innerWidth - rect.right}px`;
+    dropdown.style.zIndex = '10000';
+    
+    // Add click handlers for menu items
+    dropdown.querySelectorAll('.kebab-dropdown-item').forEach(menuItem => {
+      menuItem.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const action = menuItem.dataset.action;
+        handleKebabAction(action, item, itemType);
+        closeKebabMenu();
+      });
+    });
+    
+    // Add to document
+    document.body.appendChild(dropdown);
+    activeDropdown = dropdown;
+    
+    // Mark button as active
+    button.classList.add('active');
+    
+    // Close on outside click
+    setTimeout(() => {
+      document.addEventListener('click', closeKebabMenuOnOutsideClick);
+    }, 0);
+  }
+  
+  /**
+   * Closes the active kebab menu dropdown
+   */
+  function closeKebabMenu() {
+    if (activeDropdown) {
+      activeDropdown.remove();
+      activeDropdown = null;
+    }
+    // Remove active class from all kebab buttons
+    document.querySelectorAll('.btn-kebab.active').forEach(btn => {
+      btn.classList.remove('active');
+    });
+    document.removeEventListener('click', closeKebabMenuOnOutsideClick);
+  }
+  
+  /**
+   * Closes kebab menu when clicking outside
+   */
+  function closeKebabMenuOnOutsideClick(e) {
+    if (activeDropdown && !activeDropdown.contains(e.target) && !e.target.closest('.btn-kebab')) {
+      closeKebabMenu();
+    }
+  }
+  
+  /**
+   * Handles kebab menu actions
+   * @param {string} action - The action to perform
+   * @param {Object} item - The item data
+   * @param {string} itemType - The type of item
+   */
+  async function handleKebabAction(action, item, itemType) {
+    switch (action) {
+      case 'copy':
+        try {
+          await navigator.clipboard.writeText(item.url);
+          showToast('URL copied!');
+        } catch {
+          showToast('Copy failed', true);
+        }
+        break;
+        
+      case 'download':
+        chrome.runtime.sendMessage({
+          cmd: 'DOWNLOAD_VIDEO',
+          url: item.url,
+          filename: item.name || 'download',
+          headers: item.headers || {}
+        }, (response) => {
+          if (chrome.runtime.lastError) {
+            showToast('Download failed', true);
+            return;
+          }
+          if (response?.success) {
+            showToast('Download started!');
+          } else {
+            showToast('Download failed: ' + (response?.error || 'Unknown error'), true);
+          }
+        });
+        break;
+        
+      case 'curl':
+        // Build and copy curl command
+        const headers = item.headers || {};
+        let curlCmd = `curl -L "${item.url}"`;
+        if (headers['User-Agent']) {
+          curlCmd += ` -H "User-Agent: ${headers['User-Agent']}"`;
+        }
+        if (headers['Referer']) {
+          curlCmd += ` -H "Referer: ${headers['Referer']}"`;
+        }
+        if (headers['Origin']) {
+          curlCmd += ` -H "Origin: ${headers['Origin']}"`;
+        }
+        Object.entries(headers).forEach(([key, value]) => {
+          if (!['User-Agent', 'Referer', 'Origin'].includes(key)) {
+            curlCmd += ` -H "${key}: ${value}"`;
+          }
+        });
+        curlCmd += ` -o "${(item.name || 'download').replace(/[^a-zA-Z0-9.]/g, '_')}"`;
+        try {
+          await navigator.clipboard.writeText(curlCmd);
+          showToast('cURL command copied!');
+        } catch {
+          showToast('Copy failed', true);
+        }
+        break;
+    }
   }
 
 })();
