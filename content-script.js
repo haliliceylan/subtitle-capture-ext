@@ -75,8 +75,16 @@ async function fetchM3U8Content(url, headers = {}) {
     if (headerKeys.length > 0) {
       console.log('[ContentScript] Processing headers...');
       
-      // Build headers object - only include truly safe headers
+      // Build headers object - pass through most headers
+      // The browser will silently ignore headers it doesn't allow (like User-Agent in some cases)
       const safeHeaders = {};
+      
+      // Headers that would definitely cause fetch to throw an error
+      const forbiddenHeaders = new Set([
+        'accept-charset', 'accept-encoding', 'access-control-request-headers', 'access-control-request-method',
+        'connection', 'content-length', 'cookie', 'cookie2', 'date', 'expect', 'host', 'keep-alive',
+        'origin', 'referer', 'set-cookie', 'te', 'trailer', 'transfer-encoding', 'upgrade', 'via'
+      ]);
       
       for (const [key, value] of Object.entries(headers)) {
         console.log(`[ContentScript] Processing header: "${key}" = "${value}"`);
@@ -87,29 +95,26 @@ async function fetchM3U8Content(url, headers = {}) {
         }
         
         const lowerKey = key.toLowerCase();
-        console.log(`[ContentScript] Header lowercase: "${lowerKey}"`);
         
-        // Only allow specific safe headers
-        // Let the browser handle: origin, referer, cookie, host, etc.
-        const allowedHeaders = ['authorization', 'x-custom-token', 'x-requested-with'];
-        
-        if (allowedHeaders.includes(lowerKey)) {
-          console.log(`[ContentScript] Header "${key}" is ALLOWED`);
-          safeHeaders[key] = value;
-        } else {
-          console.log(`[ContentScript] Header "${key}" is BLOCKED (not in allowed list)`);
+        // Skip headers that would cause fetch to throw
+        if (forbiddenHeaders.has(lowerKey)) {
+          console.log(`[ContentScript] Header "${key}" is FORBIDDEN, skipping`);
+          continue;
         }
+        
+        console.log(`[ContentScript] Header "${key}" is ALLOWED`);
+        safeHeaders[key] = value;
       }
       
       console.log('[ContentScript] Safe headers to use:', JSON.stringify(safeHeaders, null, 2));
       
-      // Only add headers if we have safe ones
+      // Add headers to fetch options (browser will handle which ones it actually sends)
       const safeHeaderKeys = Object.keys(safeHeaders);
       if (safeHeaderKeys.length > 0) {
         fetchOptions.headers = safeHeaders;
-        console.log('[ContentScript] Added safe headers to fetchOptions');
+        console.log('[ContentScript] Added headers to fetchOptions');
       } else {
-        console.log('[ContentScript] No safe headers to add, using default fetch');
+        console.log('[ContentScript] No valid headers to add, using default fetch');
       }
     } else {
       console.log('[ContentScript] No headers provided, using default fetch');

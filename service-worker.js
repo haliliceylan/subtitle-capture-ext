@@ -32,21 +32,18 @@ const DASH_MIME_TYPES = new Set([
 ]);
 
 const STRIP_HEADERS = new Set([
-  'range', 'content-length', 'content-type', 'accept-encoding', 'accept', 'accept-language',
-  'upgrade-insecure-requests', 'sec-fetch-dest', 'sec-fetch-mode', 'sec-fetch-site', 'sec-fetch-user',
-  'cache-control', 'pragma'
+  'range', 'content-length', 'content-type', 'accept-encoding',
+  'upgrade-insecure-requests', 'cache-control', 'pragma'
 ]);
 
 // Forbidden headers that cannot be set via JavaScript fetch (browser-controlled)
 // See: https://developer.mozilla.org/en-US/docs/Glossary/Forbidden_header_name
+// Note: We allow some headers like dnt, user-agent, sec-fetch-* to be passed through
+// The browser will silently ignore headers it doesn't allow
 const FORBIDDEN_HEADERS = new Set([
   'accept-charset', 'accept-encoding', 'access-control-request-headers', 'access-control-request-method',
-  'connection', 'content-length', 'cookie', 'cookie2', 'date', 'dnt', 'expect', 'host', 'keep-alive',
-  'origin', 'referer', 'set-cookie', 'te', 'trailer', 'transfer-encoding', 'upgrade', 'via',
-  // Additional headers that cause "unsafe header" errors in content scripts
-  'user-agent', 'sec-ch-ua', 'sec-ch-ua-mobile', 'sec-ch-ua-platform', 'sec-ch-ua-full-version',
-  'sec-ch-ua-full-version-list', 'sec-ch-ua-arch', 'sec-ch-ua-bitness', 'sec-ch-ua-model',
-  'sec-ch-ua-platform-version', 'sec-ch-ua-wow64'
+  'connection', 'content-length', 'cookie', 'cookie2', 'date', 'expect', 'host', 'keep-alive',
+  'origin', 'referer', 'set-cookie', 'te', 'trailer', 'transfer-encoding', 'upgrade', 'via'
 ]);
 
 // Constants for magic numbers
@@ -685,9 +682,12 @@ function buildMpvCommand(streamItem, subtitleItems = []) {
   
   return [
     'mpv',
+    `--ytdl=no`,  // Disable youtube-dl hook to avoid interference with direct HLS playback
     headerOpt,
     `--force-window=immediate`,
     `--sub-auto=fuzzy`,  // Auto-load subtitles with similar names
+    // Allow ALL file extensions for HLS segments (some CDNs use fake extensions like .jpg, .html, .js)
+    `--demuxer-lavf-o=allowed_extensions=ALL`,
     subOpts,
     `'${shellEscapeSingle(streamUrl)}'`
   ].filter(Boolean).join(' ');
