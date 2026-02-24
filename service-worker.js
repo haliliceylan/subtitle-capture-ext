@@ -648,49 +648,53 @@ function normalizeFilename(title) {
 function buildMpvHeaderOption(headers) {
   const entries = Object.entries(headers || {});
   if (!entries.length) return '';
-  // Each header must be in its own quoted string, separated by commas
-  // Format: --http-header-fields='Header1: value1','Header2: value2'
-  const quotedHeaders = entries.map(([k, v]) => `'${shellEscapeSingle(k)}: ${shellEscapeSingle(v)}'`).join(',');
-  return `--http-header-fields=${quotedHeaders}`;
+  // Format headers for --demuxer-lavf-o=http_header_fields using $'...' syntax
+  // Each header on its own line with \r\n separator
+  const headerLines = entries.map(([k, v]) => `${k}: ${v}`).join('\r\n');
+  return `--demuxer-lavf-o=http_header_fields=$'${headerLines}\r\n'`;
 }
 
 function buildMpvCommand(streamItem, subtitleItems = []) {
   const streamUrl = streamItem?.url;
   if (!streamUrl) return '';
-  
-  // Build header option for stream (applies to all requests including subtitles)
-  const headerOpt = buildMpvHeaderOption(streamItem.headers || {});
-  
+
+  const headers = streamItem.headers || {};
+
+  // Extract user-agent if present
+  const userAgent = headers['User-Agent'] || headers['user-agent'];
+  const otherHeaders = { ...headers };
+  delete otherHeaders['User-Agent'];
+  delete otherHeaders['user-agent'];
+
+  // Build header option for stream (using demuxer-lavf-o format)
+  const headerOpt = buildMpvHeaderOption(otherHeaders);
+
+  // Build user-agent option
+  const userAgentOpt = userAgent ? `  --user-agent='${shellEscapeSingle(userAgent)}' \\\n` : '';
+
   // Build subtitle options - each subtitle gets its own --sub-file flag
-  // If subtitle needs auth headers, they're included in the main header option
   const subOpts = subtitleItems
     .filter((s) => s?.url)
-    .map((s, idx) => {
-      // Add subtitle-specific headers if they differ from stream headers
-      const subHeaders = s.headers || {};
-      const needsCustomHeaders = Object.keys(subHeaders).length > 0 && 
-                                  JSON.stringify(subHeaders) !== JSON.stringify(streamItem.headers || {});
-      
-      if (needsCustomHeaders) {
-        // For subtitles with different headers, use http-header-fields per subtitle
-        const subHeaderOpt = buildMpvHeaderOption(subHeaders).replace('--http-header-fields=', '');
-        return `--sub-file='${shellEscapeSingle(s.url)}' --sub-file-paths='' --http-header-fields=${subHeaderOpt}`;
-      }
-      return `--sub-file='${shellEscapeSingle(s.url)}'`;
+    .map((s) => {
+      return `  --sub-file='${shellEscapeSingle(s.url)}' \\\n`;
     })
-    .join(' ');
-  
-  return [
-    'mpv',
-    `--ytdl=no`,  // Disable youtube-dl hook to avoid interference with direct HLS playback
-    headerOpt,
-    `--force-window=immediate`,
-    `--sub-auto=fuzzy`,  // Auto-load subtitles with similar names
-    // Allow ALL file extensions for HLS segments (some CDNs use fake extensions like .jpg, .html, .js)
-    `--demuxer-lavf-o=allowed_extensions=ALL`,
+    .join('');
+
+  // Build the command with proper line continuation
+  const parts = [
+    'mpv \\\n',
+    `  --force-window=immediate \\\n`,
+    `  --sub-auto=fuzzy \\\n`,
+    `  --demuxer-lavf-o=allowed_extensions=ALL \\\n`,
     subOpts,
-    `'${shellEscapeSingle(streamUrl)}'`
-  ].filter(Boolean).join(' ');
+    userAgentOpt,
+    headerOpt ? `  ${headerOpt} \\\n` : '',
+    `  '${shellEscapeSingle(streamUrl)}' \\\n`,
+    `  --msg-level=ffmpeg=trace,demuxer=trace,network=trace \\\n`,
+    `  --log-file=mpv-trace.log`
+  ];
+
+  return parts.filter(Boolean).join('');
 }
 
 function buildFfmpegHeaders(headers) {
