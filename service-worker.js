@@ -123,6 +123,18 @@ function getHeaderValue(responseHeaders, name) {
   return '';
 }
 
+// Convert headers array to plain object (keeps ALL headers)
+function headersArrayToObject(reqHeaders) {
+  const headers = {};
+  for (const h of reqHeaders) {
+    const k = h.name || '';
+    if (!k) continue;
+    headers[k] = h.value || '';
+  }
+  return headers;
+}
+
+// Sanitize headers for content script fetch (strips forbidden headers)
 function sanitizeHeaders(reqHeaders) {
   const headers = {};
   for (const h of reqHeaders) {
@@ -135,6 +147,19 @@ function sanitizeHeaders(reqHeaders) {
     }
   }
   return headers;
+}
+
+// Get headers safe for content script (from stored full headers object)
+function getSafeHeadersForContentScript(fullHeaders) {
+  const safeHeaders = {};
+  for (const [k, v] of Object.entries(fullHeaders || {})) {
+    if (!k) continue;
+    const lowerK = k.toLowerCase();
+    if (!STRIP_HEADERS.has(lowerK) && !FORBIDDEN_HEADERS.has(lowerK)) {
+      safeHeaders[k] = v;
+    }
+  }
+  return safeHeaders;
 }
 
 // Resolve relative URL to absolute URL
@@ -258,15 +283,16 @@ async function getMediaPlaylistDuration(mediaUrl, tabId, headers = {}, retries =
 
       // Send message to content script to fetch the media playlist
       // The content script runs in the page context and can use the page's Origin/Referer headers
-      // Pass headers to the content script so it can use them for authentication
+      // Sanitize headers for content script (browser handles Origin/Referer automatically)
+      const safeHeaders = getSafeHeadersForContentScript(headers);
       console.log('[ServiceWorker] Sending fetchMediaPlaylist message to tab', tabId);
       console.log('[ServiceWorker] URL:', mediaUrl);
-      console.log('[ServiceWorker] Headers being sent:', JSON.stringify(headers, null, 2));
-      
+      console.log('[ServiceWorker] Headers being sent:', JSON.stringify(safeHeaders, null, 2));
+
       const response = await chrome.tabs.sendMessage(tabId, {
         action: 'fetchMediaPlaylist',
         url: mediaUrl,
-        headers: headers
+        headers: safeHeaders
       });
       
       console.log('[ServiceWorker] Received response from content script:', response);
@@ -625,8 +651,10 @@ function normalizeFilename(title) {
 function buildMpvHeaderOption(headers) {
   const entries = Object.entries(headers || {});
   if (!entries.length) return '';
-  const joined = entries.map(([k, v]) => `${k}: ${v}`).join(',');
-  return `--http-header-fields='${shellEscapeSingle(joined)}'`;
+  // Each header must be in its own quoted string, separated by commas
+  // Format: --http-header-fields='Header1: value1','Header2: value2'
+  const quotedHeaders = entries.map(([k, v]) => `'${shellEscapeSingle(k)}: ${shellEscapeSingle(v)}'`).join(',');
+  return `--http-header-fields=${quotedHeaders}`;
 }
 
 function buildMpvCommand(streamItem, subtitleItems = []) {
@@ -796,7 +824,14 @@ function buildFfmpegCommand(streamItem, subtitleItems = [], outputFormat = 'mp4'
 
 async function downloadVideo(url, filename, headers = {}) {
   // Build headers array for chrome.downloads API
-  const headerArray = Object.entries(headers).map(([name, value]) => ({ name, value }));
+  // Filter out forbidden headers that chrome.downloads can't handle
+  const headerArray = [];
+  for (const [name, value] of Object.entries(headers)) {
+    const lowerName = name.toLowerCase();
+    if (!FORBIDDEN_HEADERS.has(lowerName)) {
+      headerArray.push({ name, value });
+    }
+  }
 
   const downloadOptions = {
     url: url,
@@ -951,7 +986,9 @@ chrome.webRequest.onResponseStarted.addListener(
       }
     }
 
-    const headers = sanitizeHeaders(reqHeaders);
+    // Store full headers (for MPV/ffmpeg commands) and sanitized headers (for content script)
+    const fullHeaders = headersArrayToObject(reqHeaders);
+    const sanitizedHeaders = sanitizeHeaders(reqHeaders);
     const timestamp = Date.now();
     const name = deriveFilename(url, responseHeaders, kind === 'stream' ? 'stream.m3u8' : 'subtitle');
     const key = kind === 'stream' ? `streams_${tabId}` : `subs_${tabId}`;
@@ -972,7 +1009,7 @@ chrome.webRequest.onResponseStarted.addListener(
     const metadata = extractMediaMetadata(url, responseHeaders, format, size, mediaType);
 
     const itemData = {
-      url, format, name, size, headers, tabId, timestamp, kind,
+      url, format, name, size, headers: fullHeaders, tabId, timestamp, kind,
       mediaType,
       ...metadata
     };
@@ -989,14 +1026,16 @@ chrome.webRequest.onResponseStarted.addListener(
         // Send message to content script in the specific tab to fetch the m3u8
         // The content script runs in the page context and can use the page's Origin/Referer headers
         // Pass headers so the content script can use them for authentication
+        // Use sanitized headers for content script (browser handles Origin/Referer automatically)
+        const safeHeaders = getSafeHeadersForContentScript(fullHeaders);
         console.log('[ServiceWorker] Sending fetchM3U8 message to tab', tabId);
         console.log('[ServiceWorker] URL:', url);
-        console.log('[ServiceWorker] Headers being sent:', JSON.stringify(headers, null, 2));
-        
+        console.log('[ServiceWorker] Headers being sent:', JSON.stringify(safeHeaders, null, 2));
+
         const response = await chrome.tabs.sendMessage(tabId, {
           action: 'fetchM3U8',
           url: url,
-          headers: headers
+          headers: safeHeaders
         });
         
         console.log('[ServiceWorker] Received response from content script:', response);
@@ -1011,7 +1050,7 @@ chrome.webRequest.onResponseStarted.addListener(
         // fall back to direct fetch (may fail with 403 on some CDNs)
         console.warn('Content script fetch failed, trying fallback:', e);
         try {
-          const playlistInfo = await parseHLSMasterPlaylist(url, headers);
+          const playlistInfo = await parseHLSMasterPlaylist(url, fullHeaders);
           await enrichHlsItemWithDuration(itemData, playlistInfo, tabId);
         } catch (fallbackError) {
           console.warn('Fallback parse also failed:', fallbackError);
