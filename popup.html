@@ -54,8 +54,6 @@
       --accent-mpv-hover: #e55a2b;
       --accent-ffmpeg: #8B5CF6;
       --accent-ffmpeg-hover: #7C3AED;
-      --accent-download: #10B981;
-      --accent-download-hover: #059669;
       
       --shadow-card: 0 2px 8px rgba(0,0,0,0.08);
       --shadow-card-selected: 0 0 0 2px rgba(0,119,255,0.15);
@@ -105,8 +103,6 @@
       --accent-mpv-hover: #ff9a6a;
       --accent-ffmpeg: #a78bfa;
       --accent-ffmpeg-hover: #c4b5fd;
-      --accent-download: #34d399;
-      --accent-download-hover: #6ee7b7;
       
       --shadow-card: 0 2px 8px rgba(0,0,0,0.3);
       --shadow-card-selected: 0 0 0 2px rgba(77,163,255,0.25);
@@ -633,21 +629,11 @@
       border-color: var(--border-action);
     }
     .btn-copy:hover { background: var(--bg-action-btn-hover); }
-    .btn-download {
-      background: var(--accent-primary);
-      color: #fff;
-    }
-    .btn-download:hover { background: var(--accent-primary-hover); }
     .btn-ffmpeg {
       background: var(--accent-ffmpeg);
       color: #fff;
     }
     .btn-ffmpeg:hover { background: var(--accent-ffmpeg-hover); }
-    .btn-direct-download {
-      background: var(--accent-download);
-      color: #fff;
-    }
-    .btn-direct-download:hover { background: var(--accent-download-hover); }
     .btn-icon {
       flex: 0 0 auto;
       padding: 6px 8px;
@@ -775,18 +761,6 @@
       background: var(--text-muted);
       color: var(--text-tertiary);
       border-color: transparent;
-      cursor: not-allowed;
-      opacity: 0.5;
-    }
-
-    .command-btn.download-subs {
-      background: var(--accent-download);
-      color: #fff;
-      display: none; /* Hidden by default, shown when subtitles selected */
-    }
-    .command-btn.download-subs:hover { background: var(--accent-download-hover); }
-    .command-btn.download-subs:disabled {
-      background: var(--text-muted);
       cursor: not-allowed;
       opacity: 0.5;
     }

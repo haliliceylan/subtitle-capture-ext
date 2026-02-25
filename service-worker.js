@@ -6,8 +6,6 @@ import {
   VIDEO_MIME_TYPES,
   HLS_EXTENSIONS,
   HLS_MIME_TYPES,
-  DASH_EXTENSIONS,
-  DASH_MIME_TYPES,
   FETCH_TIMEOUT_MS,
   M3U8_FETCH_TIMEOUT_MS,
   HEADER_TTL_MS
@@ -41,10 +39,6 @@ import {
   buildFfmpegCommand,
   LANGUAGE_CODE_MAP
 } from './modules/commands.js';
-import {
-  downloadVideo,
-  downloadSubtitle
-} from './modules/downloads.js';
 
 const pendingReqHeaders = {};
 const headerCleanupTimers = new Map();
@@ -173,13 +167,7 @@ chrome.webRequest.onResponseStarted.addListener(
       format = 'm3u8';
       mediaType = 'hls';
     }
-    // 2. Check for DASH streams
-    else if (DASH_MIME_TYPES.has(contentType) || (ext && DASH_EXTENSIONS.has(ext))) {
-      kind = 'stream';
-      format = 'mpd';
-      mediaType = 'dash';
-    }
-    // 3. Check for video files (MP4, WebM, etc.)
+    // 2. Check for video files (MP4, WebM, etc.)
     else if (VIDEO_MIME_TYPES.has(contentType) || (ext && VIDEO_EXTENSIONS.has(ext))) {
       kind = 'stream';
       format = ext || contentType.split('/')[1] || 'video';
@@ -348,28 +336,4 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     return true;
   }
 
-  if (message.cmd === 'DOWNLOAD_VIDEO') {
-    const { url, filename, headers } = message;
-    downloadVideo(url, filename, headers)
-      .then(downloadId => sendResponse({ success: true, downloadId }))
-      .catch(error => sendResponse({ success: false, error: error.message }));
-    return true;
-  }
-
-  if (message.cmd === 'DOWNLOAD_SUBTITLE') {
-    console.log('[ServiceWorker] Received DOWNLOAD_SUBTITLE command');
-    const { url, filename, headers } = message;
-    console.log('[ServiceWorker] Download request:', { url, filename, headers: Object.keys(headers || {}) });
-    
-    downloadSubtitle(url, filename, headers)
-      .then(downloadId => {
-        console.log('[ServiceWorker] Download successful, ID:', downloadId);
-        sendResponse({ success: true, downloadId });
-      })
-      .catch(error => {
-        console.error('[ServiceWorker] Download failed:', error.message);
-        sendResponse({ success: false, error: error.message });
-      });
-    return true;
-  }
 });

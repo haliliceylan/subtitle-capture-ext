@@ -31,18 +31,18 @@ export function normalizeFilename(title) {
 
 /**
  * Builds mpv HTTP header option string.
- * Format: --stream-lavf-o=http_header_fields=$'Header1: value1\r\nHeader2: value2\r\n'
- * Uses ANSI-C quoting ($'...') to support CRLF separators required by ffmpeg.
+ * Format: --http-header-fields="Header1: value1,Header2: value2"
+ * Headers are comma-separated.
  * @param {Object.<string, string>} headers - Headers object.
  * @returns {string} The mpv header option string, or empty string if no headers.
  */
 export function buildMpvHeaderOption(headers) {
   const entries = Object.entries(headers || {});
   if (!entries.length) return '';
-  // Format headers with CRLF separators using ANSI-C quoting
-  // Format: --stream-lavf-o=http_header_fields=$'Header1: value1\r\nHeader2: value2\r\n'
-  const formattedHeaders = entries.map(([k, v]) => `${k}: ${v}`).join('\\r\\n');
-  return `--stream-lavf-o=http_header_fields=$'${formattedHeaders}\\r\\n'`;
+  // Format headers with comma separators
+  // Format: --http-header-fields="Header1: value1,Header2: value2"
+  const formattedHeaders = entries.map(([k, v]) => `${k}: ${v}`).join(',');
+  return `--http-header-fields="${formattedHeaders}"`;
 }
 
 /**
@@ -76,14 +76,14 @@ export function buildMpvCommand(streamItem, subtitleItems = []) {
   // Build header option for stream (using stream-lavf-o format)
   const headerOpt = buildMpvHeaderOption(essentialHeaders);
 
-  // Build user-agent option
-  const userAgentOpt = userAgent ? `  --user-agent='${shellEscapeSingle(userAgent)}' \\\n` : '';
+  // Build user-agent option (using double quotes)
+  const userAgentOpt = userAgent ? `  --user-agent="${userAgent}" \\\n` : '';
 
-  // Build subtitle options - each subtitle gets its own --sub-file flag
+  // Build subtitle options - each subtitle gets its own --sub-file flag (using double quotes)
   const subOpts = subtitleItems
     .filter((s) => s?.url)
     .map((s) => {
-      return `  --sub-file='${shellEscapeSingle(s.url)}' \\\n`;
+      return `  --sub-file="${s.url}" \\\n`;
     })
     .join('');
 
@@ -99,7 +99,7 @@ export function buildMpvCommand(streamItem, subtitleItems = []) {
     headerOpt ? `  ${headerOpt} \\\n` : '',
     `  --msg-level=ffmpeg=trace,demuxer=trace,network=trace \\\n`,
     `  --log-file=mpv-trace.log \\\n`,
-    `  '${shellEscapeSingle(streamUrl)}'`
+    `  "${streamUrl}"`
   ];
 
   return parts.filter(Boolean).join('');

@@ -63,23 +63,6 @@ export const HLS_EXTENSIONS = new Set(['m3u8', 'm3u']);
 export const HLS_MIME_TYPES = new Set(['application/vnd.apple.mpegurl', 'application/x-mpegurl']);
 
 /**
- * DASH (Dynamic Adaptive Streaming over HTTP) file extensions.
- * Used for detecting DASH manifest files.
- * @constant {Set<string>}
- */
-export const DASH_EXTENSIONS = new Set(['mpd']);
-
-/**
- * DASH MIME types.
- * Used for content-type based DASH stream detection.
- * @constant {Set<string>}
- */
-export const DASH_MIME_TYPES = new Set([
-  'application/dash+xml',
-  'application/vnd.mpeg.dash.mpd'
-]);
-
-/**
  * Headers to strip from requests.
  * These headers are removed when forwarding requests to avoid conflicts.
  * @constant {Set<string>}

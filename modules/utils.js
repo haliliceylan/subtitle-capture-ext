@@ -76,25 +76,35 @@ export function headersArrayToObject(reqHeaders) {
 }
 
 /**
+ * Sanitizes headers by stripping response-related headers (STRIP_HEADERS).
+ * This is the canonical header sanitization function used throughout the extension.
+ * @param {Object.<string, string>} headers - Headers object.
+ * @returns {Object.<string, string>} Sanitized headers object.
+ */
+function stripStripHeaders(headers) {
+  const sanitized = {};
+  for (const [k, v] of Object.entries(headers || {})) {
+    if (!k) continue;
+    if (!STRIP_HEADERS.has(k.toLowerCase())) {
+      sanitized[k] = v;
+    }
+  }
+  return sanitized;
+}
+
+/**
  * Sanitizes headers for content script fetch.
- * Only strips response-related headers (STRIP_HEADERS).
- * Content script will filter FORBIDDEN_HEADERS as needed.
+ * Converts headers array to object while stripping response-related headers (STRIP_HEADERS).
  * @param {Array<{name: string, value: string}>} reqHeaders - Request headers array.
  * @returns {Object.<string, string>} Sanitized headers object.
  */
 export function sanitizeHeaders(reqHeaders) {
   const headers = {};
-  for (const h of reqHeaders) {
+  for (const h of reqHeaders || []) {
     const k = h.name || '';
-    if (!k) continue;
-    // Only strip response-related headers, pass everything else to content script
-    // Content script will filter FORBIDDEN_HEADERS as needed
-    const lowerK = k.toLowerCase();
-    if (!STRIP_HEADERS.has(lowerK)) {
-      headers[k] = h.value || '';
-    }
+    if (k) headers[k] = h.value || '';
   }
-  return headers;
+  return stripStripHeaders(headers);
 }
 
 /**
@@ -104,16 +114,7 @@ export function sanitizeHeaders(reqHeaders) {
  * @returns {Object.<string, string>} Safe headers for content script.
  */
 export function getSafeHeadersForContentScript(fullHeaders) {
-  const safeHeaders = {};
-  for (const [k, v] of Object.entries(fullHeaders || {})) {
-    if (!k) continue;
-    // Only strip response-related headers, pass everything else to content script
-    const lowerK = k.toLowerCase();
-    if (!STRIP_HEADERS.has(lowerK)) {
-      safeHeaders[k] = v;
-    }
-  }
-  return safeHeaders;
+  return stripStripHeaders(fullHeaders);
 }
 
 /**

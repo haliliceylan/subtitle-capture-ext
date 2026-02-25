@@ -1043,29 +1043,6 @@ function initTheme() {
         options.onCheckboxChange();
       });
     }
-
-    // Direct download handler for video files
-    if (options.onDirectDownload) {
-      card.querySelector('[data-action="direct-download"]')?.addEventListener('click', () => {
-        chrome.runtime.sendMessage({
-          cmd: 'DOWNLOAD_VIDEO',
-          url: item.url,
-          filename: item.name,
-          headers: item.headers || {}
-        }, (response) => {
-          if (chrome.runtime.lastError) {
-            console.error('Failed to download video:', chrome.runtime.lastError.message);
-            showToast('Failed to start download', true);
-            return;
-          }
-          if (response?.success) {
-            showToast('Download started!');
-          } else {
-            showToast('Download failed: ' + (response?.error || 'Unknown error'), true);
-          }
-        });
-      });
-    }
   }
 
   function appendStreamCard(id, item) {
