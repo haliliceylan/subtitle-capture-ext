@@ -74,12 +74,15 @@ async function fetchM3U8Content(url, headers = {}) {
 
     if (headerKeys.length > 0) {
       console.log('[ContentScript] Processing headers...');
-      
+
       // Build headers object - pass through most headers
       // The browser will silently ignore headers it doesn't allow (like User-Agent in some cases)
       const safeHeaders = {};
-      
-      // Headers that would definitely cause fetch to throw an error
+
+      // BUG FIX (Phase 1): Content script filters FORBIDDEN_HEADERS
+      // Service worker now passes ALL headers, content script filters what it can't use.
+      // These are forbidden header names that cannot be set via JavaScript fetch.
+      // See: https://developer.mozilla.org/en-US/docs/Glossary/Forbidden_header_name
       const forbiddenHeaders = new Set([
         'accept-charset', 'accept-encoding', 'access-control-request-headers', 'access-control-request-method',
         'connection', 'content-length', 'cookie', 'cookie2', 'date', 'expect', 'host', 'keep-alive',

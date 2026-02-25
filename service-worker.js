@@ -1,227 +1,73 @@
 // Combined Stream + Subtitle Catcher service worker
-const SUBTITLE_MIME_MAP = {
-  'text/vtt': 'vtt',
-  'text/webvtt': 'vtt',
-  'application/x-subrip': 'srt',
-  'text/x-ssa': 'ass',
-  'text/x-ass': 'ass',
-  'application/ttml+xml': 'ttml',
-  'application/ttaf+xml': 'ttml',
-  'text/ttml': 'ttml',
-  'application/xml': null,
-  'text/xml': null,
-  'text/plain': null,
-  'application/octet-stream': null,
-};
-
-const SUBTITLE_EXTENSIONS = new Set(['vtt', 'srt', 'ass', 'ssa', 'sub', 'ttml', 'dfxp', 'sbv', 'stl', 'lrc', 'smi']);
-
-const VIDEO_EXTENSIONS = new Set(['mp4', 'webm', 'mkv', 'avi', 'mov', 'flv', 'wmv', 'm4v', 'mpg', 'mpeg', '3gp', 'ogv']);
-const VIDEO_MIME_TYPES = new Set([
-  'video/mp4', 'video/webm', 'video/x-matroska', 'video/avi', 'video/quicktime',
-  'video/x-flv', 'video/x-ms-wmv', 'video/3gpp', 'video/ogg', 'video/mpeg'
-]);
-
-const HLS_EXTENSIONS = new Set(['m3u8', 'm3u']);
-const HLS_MIME_TYPES = new Set(['application/vnd.apple.mpegurl', 'application/x-mpegurl']);
-
-const DASH_EXTENSIONS = new Set(['mpd']);
-const DASH_MIME_TYPES = new Set([
-  'application/dash+xml',
-  'application/vnd.mpeg.dash.mpd'
-]);
-
-const STRIP_HEADERS = new Set([
-  'range', 'content-length', 'content-type', 'accept-encoding',
-  'upgrade-insecure-requests', 'cache-control', 'pragma'
-]);
-
-// Forbidden headers that cannot be set via JavaScript fetch (browser-controlled)
-// See: https://developer.mozilla.org/en-US/docs/Glossary/Forbidden_header_name
-// Note: We allow some headers like dnt, user-agent, sec-fetch-* to be passed through
-// The browser will silently ignore headers it doesn't allow
-const FORBIDDEN_HEADERS = new Set([
-  'accept-charset', 'accept-encoding', 'access-control-request-headers', 'access-control-request-method',
-  'connection', 'content-length', 'cookie', 'cookie2', 'date', 'expect', 'host', 'keep-alive',
-  'origin', 'referer', 'set-cookie', 'te', 'trailer', 'transfer-encoding', 'upgrade', 'via'
-]);
-
-// Constants for magic numbers
-const MAX_ITEMS_PER_TAB = 50;
-const FETCH_TIMEOUT_MS = 5000;
-const M3U8_FETCH_TIMEOUT_MS = 10000;
+import {
+  SUBTITLE_MIME_MAP,
+  SUBTITLE_EXTENSIONS,
+  VIDEO_EXTENSIONS,
+  VIDEO_MIME_TYPES,
+  HLS_EXTENSIONS,
+  HLS_MIME_TYPES,
+  DASH_EXTENSIONS,
+  DASH_MIME_TYPES,
+  FETCH_TIMEOUT_MS,
+  M3U8_FETCH_TIMEOUT_MS,
+  HEADER_TTL_MS
+} from './modules/constants.js';
+import { storage } from './modules/storage.js';
+import {
+  parseHLSMasterPlaylistContent,
+  parseHLSMasterPlaylist,
+  enrichHlsItem
+} from './modules/hls-parser.js';
+import {
+  urlExtension,
+  deriveFilename,
+  getHeaderValue,
+  headersArrayToObject,
+  sanitizeHeaders,
+  getSafeHeadersForContentScript,
+  resolveUrl,
+  formatBitrate,
+  formatSize,
+  formatDuration,
+  extractMediaMetadata
+} from './modules/utils.js';
+import {
+  shellEscapeSingle,
+  normalizeFilename,
+  buildMpvHeaderOption,
+  buildMpvCommand,
+  buildFfmpegHeaders,
+  getFfmpegLanguageCode,
+  buildFfmpegCommand,
+  LANGUAGE_CODE_MAP
+} from './modules/commands.js';
+import {
+  downloadVideo,
+  downloadSubtitle
+} from './modules/downloads.js';
 
 const pendingReqHeaders = {};
+const headerCleanupTimers = new Map();
 
-// Queue to prevent race conditions when saving items
-const saveQueue = {};
-async function queuedSave(key, requestId, itemData, url) {
-  // Create queue for this key if it doesn't exist
-  if (!saveQueue[key]) {
-    saveQueue[key] = Promise.resolve();
-  }
+// Cache for content script ready state per tab to avoid redundant injections
+// Cleared on navigation to ensure freshness
+const contentScriptReadyCache = new Map();
 
-  // Chain this save operation
-  saveQueue[key] = saveQueue[key].then(async () => {
-    const stored = await chrome.storage.local.get([key]);
-    const items = stored[key] || {};
-
-    // Check for duplicates inside the queue to prevent race conditions
-    if (url && Object.values(items).some((item) => item.url === url)) {
-      return null; // Duplicate found, skip saving
-    }
-
-    // Check for max items limit
-    if (Object.keys(items).length >= MAX_ITEMS_PER_TAB) {
-      return null; // Max items reached, skip saving
-    }
-
-    items[requestId] = itemData;
-    await chrome.storage.local.set({ [key]: items });
-    return items;
-  });
-
-  return saveQueue[key];
-}
-
-function urlExtension(url) {
-  try {
-    const { pathname } = new URL(url);
-    const parts = pathname.split('.');
-    if (parts.length < 2) return null;
-    return parts[parts.length - 1].toLowerCase().split('/')[0];
-  } catch {
-    return null;
-  }
-}
-
-function deriveFilename(url, responseHeaders, fallback = 'media') {
-  for (const h of responseHeaders) {
-    if (h.name.toLowerCase() === 'content-disposition') {
-      const match = h.value.match(/filename\*?=(?:UTF-8'')?["']?([^;"'\r\n]+)/i);
-      if (match) return decodeURIComponent(match[1].trim().replace(/['"]/g, ''));
-    }
-  }
-  try {
-    const { pathname } = new URL(url);
-    const seg = pathname.split('/').pop();
-    if (seg) return seg;
-  } catch {}
-  return fallback;
-}
-
-function getHeaderValue(responseHeaders, name) {
-  const target = name.toLowerCase();
-  for (const h of responseHeaders) {
-    if (h.name.toLowerCase() === target) {
-      return (h.value || '').split(';')[0].trim().toLowerCase();
-    }
-  }
-  return '';
-}
-
-// Convert headers array to plain object (keeps ALL headers)
-function headersArrayToObject(reqHeaders) {
-  const headers = {};
-  for (const h of reqHeaders) {
-    const k = h.name || '';
-    if (!k) continue;
-    headers[k] = h.value || '';
-  }
-  return headers;
-}
-
-// Sanitize headers for content script fetch (strips forbidden headers)
-function sanitizeHeaders(reqHeaders) {
-  const headers = {};
-  for (const h of reqHeaders) {
-    const k = h.name || '';
-    if (!k) continue;
-    // Skip both STRIP_HEADERS and FORBIDDEN_HEADERS
-    const lowerK = k.toLowerCase();
-    if (!STRIP_HEADERS.has(lowerK) && !FORBIDDEN_HEADERS.has(lowerK)) {
-      headers[k] = h.value || '';
-    }
-  }
-  return headers;
-}
-
-// Get headers safe for content script (from stored full headers object)
-function getSafeHeadersForContentScript(fullHeaders) {
-  const safeHeaders = {};
-  for (const [k, v] of Object.entries(fullHeaders || {})) {
-    if (!k) continue;
-    const lowerK = k.toLowerCase();
-    if (!STRIP_HEADERS.has(lowerK) && !FORBIDDEN_HEADERS.has(lowerK)) {
-      safeHeaders[k] = v;
-    }
-  }
-  return safeHeaders;
-}
-
-// Resolve relative URL to absolute URL
-function resolveUrl(baseUrl, relativeUrl) {
-  try {
-    return new URL(relativeUrl, baseUrl).href;
-  } catch {
-    return relativeUrl;
-  }
-}
-
-// Format bandwidth (bps) to human-readable string
-function formatBitrate(bps) {
-  if (!bps || bps <= 0) return null;
-  if (bps >= 1000000) {
-    return `${(bps / 1000000).toFixed(1)}Mbps`;
-  } else if (bps >= 1000) {
-    return `${Math.round(bps / 1000)}Kbps`;
-  }
-  return `${bps}bps`;
-}
-
-// Format size in bytes to human-readable string
-function formatSize(bytes) {
-  if (!bytes || bytes <= 0) return null;
-  if (bytes < 1024) {
-    return `${bytes} B`;
-  } else if (bytes < 1024 * 1024) {
-    return `${(bytes / 1024).toFixed(1)} KB`;
-  } else if (bytes < 1024 * 1024 * 1024) {
-    return `${(bytes / 1024 / 1024).toFixed(2)} MB`;
-  } else {
-    return `${(bytes / 1024 / 1024 / 1024).toFixed(2)} GB`;
-  }
-}
-
-// Format duration in seconds to human-readable string (e.g., "2h 15m" or "45m 30s")
-function formatDuration(seconds) {
-  if (!seconds || seconds <= 0) return null;
-  
-  const hours = Math.floor(seconds / 3600);
-  const minutes = Math.floor((seconds % 3600) / 60);
-  const secs = Math.floor(seconds % 60);
-  
-  if (hours > 0) {
-    if (minutes > 0) {
-      return `${hours}h ${minutes}m`;
-    }
-    return `${hours}h`;
-  }
-  if (minutes > 0) {
-    if (secs > 0) {
-      return `${minutes}m ${secs}s`;
-    }
-    return `${minutes}m`;
-  }
-  return `${secs}s`;
-}
 
 // Helper function to ensure content script is ready in a tab
 async function ensureContentScriptReady(tabId) {
+  // BUG FIX (Phase 1): Cache content script ready state per tab to avoid redundant injections
+  // This prevents multiple injection attempts when multiple requests come in rapid succession
+  if (contentScriptReadyCache.has(tabId)) {
+    return contentScriptReadyCache.get(tabId);
+  }
+
   try {
     // Try to ping the content script
     const response = await chrome.tabs.sendMessage(tabId, { action: 'ping' });
     if (response && response.success) {
+      // Cache the ready state for this tab
+      contentScriptReadyCache.set(tabId, true);
       return true;
     }
   } catch (error) {
@@ -242,6 +88,8 @@ async function ensureContentScriptReady(tabId) {
     try {
       const response = await chrome.tabs.sendMessage(tabId, { action: 'ping' });
       if (response && response.success) {
+        // Cache the ready state for this tab
+        contentScriptReadyCache.set(tabId, true);
         return true;
       }
     } catch (verifyError) {
@@ -251,6 +99,7 @@ async function ensureContentScriptReady(tabId) {
     console.warn('Failed to inject content script:', injectError.message);
   }
 
+  contentScriptReadyCache.set(tabId, false);
   return false;
 }
 
@@ -259,647 +108,9 @@ function delay(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-// Fetch and parse media playlist to calculate total duration
-async function getMediaPlaylistDuration(mediaUrl, tabId, headers = {}, retries = 3) {
-  let lastError = null;
-
-  for (let attempt = 0; attempt < retries; attempt++) {
-    if (attempt > 0) {
-      // Exponential backoff: 200ms, 400ms, 600ms
-      const backoffMs = 200 * attempt;
-      await delay(backoffMs);
-    }
-
-    try {
-      // Ensure content script is ready before each attempt
-      const isReady = await ensureContentScriptReady(tabId);
-      if (!isReady) {
-        lastError = new Error('Content script not ready');
-        continue;
-      }
-
-      // Send message to content script to fetch the media playlist
-      // The content script runs in the page context and can use the page's Origin/Referer headers
-      // Sanitize headers for content script (browser handles Origin/Referer automatically)
-      const safeHeaders = getSafeHeadersForContentScript(headers);
-      console.log('[ServiceWorker] Sending fetchMediaPlaylist message to tab', tabId);
-      console.log('[ServiceWorker] URL:', mediaUrl);
-      console.log('[ServiceWorker] Headers being sent:', JSON.stringify(safeHeaders, null, 2));
-
-      const response = await chrome.tabs.sendMessage(tabId, {
-        action: 'fetchMediaPlaylist',
-        url: mediaUrl,
-        headers: safeHeaders
-      });
-      
-      console.log('[ServiceWorker] Received response from content script:', response);
-
-      if (!response || !response.success) {
-        lastError = new Error(response?.error || 'Unknown error');
-        continue;
-      }
-
-      const content = response.content;
-      const lines = content.split('\n').map(l => l.trim()).filter(l => l);
-
-      let totalDuration = 0;
-
-      for (const line of lines) {
-        if (line.startsWith('#EXTINF:')) {
-          // Parse duration from #EXTINF:10.000, or #EXTINF:10,
-          const durationMatch = line.match(/#EXTINF:([\d.]+)/);
-          if (durationMatch) {
-            totalDuration += parseFloat(durationMatch[1]);
-          }
-        }
-      }
-
-      return totalDuration > 0 ? totalDuration : null;
-    } catch (error) {
-      lastError = error;
-    }
-  }
-
-  console.warn('Failed to get media playlist duration after', retries, 'attempts:', lastError?.message);
-  return null;
-}
-
-// Parse codec string to extract video codec
-function parseCodec(codecsString) {
-  if (!codecsString) return null;
-
-  const codecs = codecsString.split(',').map(c => c.trim().toLowerCase());
-
-  for (const codec of codecs) {
-    if (codec.includes('hvc1') || codec.includes('hev1') || codec.includes('hevc')) return 'H265';
-    if (codec.includes('avc1') || codec.includes('avc3')) return 'H264';
-    if (codec.includes('vp9') || codec.includes('vp09')) return 'VP9';
-    if (codec.includes('av01')) return 'AV1';
-    if (codec.includes('mp4a')) return 'AAC';
-    if (codec.includes('opus')) return 'Opus';
-    if (codec.includes('mp3') || codec.includes('mp4a.40.34')) return 'MP3';
-  }
-
-  return null;
-}
-
-// Parse audio codec from codecs string
-function parseAudioCodec(codecsString) {
-  if (!codecsString) return null;
-
-  const codecs = codecsString.split(',').map(c => c.trim().toLowerCase());
-
-  for (const codec of codecs) {
-    if (codec.includes('mp4a')) return 'AAC';
-    if (codec.includes('opus')) return 'Opus';
-    if (codec.includes('mp3') || codec.includes('mp4a.40.34')) return 'MP3';
-    if (codec.includes('ac-3') || codec.includes('ac3')) return 'AC3';
-    if (codec.includes('ec-3') || codec.includes('ec3') || codec.includes('eac3')) return 'EAC3';
-    if (codec.includes('flac')) return 'FLAC';
-    if (codec.includes('dts')) return 'DTS';
-  }
-
-  return null;
-}
-
-// Parse audio groups from #EXT-X-MEDIA tags
-function parseAudioGroups(lines) {
-  const audioGroups = new Map(); // group-id -> array of audio tracks
-
-  for (const line of lines) {
-    if (line.startsWith('#EXT-X-MEDIA:')) {
-      const typeMatch = line.match(/TYPE=([^,\s]+)/);
-      if (!typeMatch || typeMatch[1] !== 'AUDIO') continue;
-
-      const groupIdMatch = line.match(/GROUP-ID="([^"]+)"/);
-      const languageMatch = line.match(/LANGUAGE="([^"]+)"/);
-      const nameMatch = line.match(/NAME="([^"]+)"/);
-
-      if (groupIdMatch) {
-        const groupId = groupIdMatch[1];
-        const language = languageMatch ? languageMatch[1] : (nameMatch ? nameMatch[1] : 'unknown');
-
-        if (!audioGroups.has(groupId)) {
-          audioGroups.set(groupId, []);
-        }
-        audioGroups.get(groupId).push(language);
-      }
-    }
-  }
-
-  return audioGroups;
-}
-
-// Derive display name for variant
-function deriveVariantName(variant) {
-  const parts = [];
-  if (variant.resolution) parts.push(variant.resolution);
-  if (variant.codec && variant.codec !== 'AAC' && variant.codec !== 'Opus') parts.push(variant.codec);
-  if (variant.bitrate) parts.push(variant.bitrate);
-  
-  if (parts.length === 0) return 'Default';
-  return parts.join(' · ');
-}
-
-// Enrich HLS item data with duration and estimated sizes for variants
-async function enrichHlsItemWithDuration(itemData, playlistInfo, tabId) {
-  if (!playlistInfo.isMasterPlaylist || playlistInfo.variants.length === 0) {
-    return itemData;
-  }
-
-  itemData.isMasterPlaylist = true;
-  itemData.variants = playlistInfo.variants;
-  itemData.name = itemData.name.replace(/\.m3u8$/i, '') + ' (Master)';
-
-  // Fetch duration from the first variant (highest quality, already sorted by bandwidth)
-  const firstVariant = playlistInfo.variants[0];
-  if (firstVariant && firstVariant.url) {
-    try {
-      const duration = await getMediaPlaylistDuration(firstVariant.url, tabId, itemData.headers);
-      if (duration) {
-        itemData.duration = duration;
-        itemData.durationFormatted = formatDuration(duration);
-
-        // Calculate estimated size for each variant
-        itemData.variants = playlistInfo.variants.map(variant => ({
-          ...variant,
-          ...(variant.bandwidth && duration && {
-            estimatedSize: (duration * variant.bandwidth) / 8,
-            estimatedSizeFormatted: formatSize((duration * variant.bandwidth) / 8)
-          })
-        }));
-      }
-    } catch (durationError) {
-      console.warn('Failed to fetch duration for HLS stream:', durationError);
-    }
-  }
-
-  return itemData;
-}
-
-// Parse HLS master playlist content (used when content is already fetched)
-function parseHLSMasterPlaylistContent(url, content) {
-  try {
-    const lines = content.split('\n').map(l => l.trim()).filter(l => l);
-
-    // Check if this is a master playlist
-    if (!lines.some(l => l.startsWith('#EXT-X-STREAM-INF'))) {
-      // Not a master playlist (might be a media playlist)
-      return { isMasterPlaylist: false, variants: [] };
-    }
-
-    // Parse audio groups first (before processing variants)
-    const audioGroups = parseAudioGroups(lines);
-
-    const variants = [];
-    let currentVariant = null;
-
-    for (let i = 0; i < lines.length; i++) {
-      const line = lines[i];
-
-      if (line.startsWith('#EXT-X-STREAM-INF')) {
-        // Parse variant attributes
-        currentVariant = {
-          bandwidth: null,
-          resolution: null,
-          codecs: null,
-          frameRate: null,
-          audio: null,
-          video: null,
-          url: null
-        };
-
-        // Extract BANDWIDTH
-        const bandwidthMatch = line.match(/BANDWIDTH=(\d+)/);
-        if (bandwidthMatch) {
-          currentVariant.bandwidth = parseInt(bandwidthMatch[1], 10);
-        }
-
-        // Extract RESOLUTION
-        const resolutionMatch = line.match(/RESOLUTION=(\d+)x(\d+)/);
-        if (resolutionMatch) {
-          const height = parseInt(resolutionMatch[2], 10);
-          currentVariant.resolution = `${height}p`;
-        }
-
-        // Extract CODECS
-        const codecsMatch = line.match(/CODECS="([^"]+)"/);
-        if (codecsMatch) {
-          currentVariant.codecs = codecsMatch[1];
-        }
-
-        // Extract FRAME-RATE
-        const frameRateMatch = line.match(/FRAME-RATE=([\d.]+)/);
-        if (frameRateMatch) {
-          currentVariant.frameRate = parseFloat(frameRateMatch[1]);
-        }
-
-        // Extract AUDIO group
-        const audioMatch = line.match(/AUDIO="([^"]+)"/);
-        if (audioMatch) {
-          currentVariant.audio = audioMatch[1];
-        }
-
-        // Extract VIDEO group
-        const videoMatch = line.match(/VIDEO="([^"]+)"/);
-        if (videoMatch) {
-          currentVariant.video = videoMatch[1];
-        }
-      } else if (currentVariant && !line.startsWith('#') && line.length > 0) {
-        // This is the URL line for the current variant
-        currentVariant.url = resolveUrl(url, line);
-
-        // Process variant data
-        const variant = {
-          url: currentVariant.url,
-          bandwidth: currentVariant.bandwidth,
-          bitrate: formatBitrate(currentVariant.bandwidth),
-          resolution: currentVariant.resolution,
-          codec: parseCodec(currentVariant.codecs),
-          audioCodec: parseAudioCodec(currentVariant.codecs),
-          codecs: currentVariant.codecs,
-          frameRate: currentVariant.frameRate,
-          audioLanguages: currentVariant.audio && audioGroups.has(currentVariant.audio)
-            ? audioGroups.get(currentVariant.audio)
-            : []
-        };
-
-        variant.name = deriveVariantName(variant);
-        variants.push(variant);
-        currentVariant = null;
-      }
-    }
-
-    return {
-      isMasterPlaylist: true,
-      variants: variants.sort((a, b) => (b.bandwidth || 0) - (a.bandwidth || 0))
-    };
-  } catch (error) {
-    console.warn('Failed to parse HLS master playlist content:', error);
-    return { isMasterPlaylist: false, variants: [], error: error.message };
-  }
-}
-
-// Parse HLS master playlist and extract variant streams (fetches content directly)
-async function parseHLSMasterPlaylist(url, headers = {}) {
-  try {
-    // Fetch the playlist content using the exact same headers from the original request
-    // headers is already sanitized from sanitizeHeaders()
-    const fetchHeaders = new Headers();
-    Object.entries(headers).forEach(([k, v]) => {
-      if (k && v !== undefined) {
-        // Skip forbidden headers that cannot be set via JavaScript
-        // These are browser-controlled headers that will cause "Unsafe header" errors
-        if (!FORBIDDEN_HEADERS.has(k.toLowerCase())) {
-          try {
-            fetchHeaders.set(k, v);
-          } catch (e) {
-            // Silently skip headers that can't be set (e.g., invalid header names)
-            console.warn('[ServiceWorker] Skipping header that cannot be set:', k);
-          }
-        }
-      }
-    });
-
-    const response = await fetch(url, {
-      method: 'GET',
-      headers: fetchHeaders,
-      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
-      referrer: headers.Referer || headers.referer || '',
-      referrerPolicy: 'no-referrer-when-downgrade'
-    });
-
-    if (!response.ok) {
-      throw new Error(`HTTP ${response.status}`);
-    }
-
-    const content = await response.text();
-    return parseHLSMasterPlaylistContent(url, content);
-  } catch (error) {
-    console.warn('Failed to parse HLS master playlist:', error);
-    return { isMasterPlaylist: false, variants: [], error: error.message };
-  }
-}
-
-function extractMediaMetadata(url, responseHeaders, format, size, mediaType) {
-  const metadata = {};
-  
-  // Extract resolution from URL patterns (common in CDN URLs)
-  const resolutionMatch = url.match(/(\d{3,4})[px_-]?(\d{3,4})?[px]?/i) || 
-                         url.match(/(360|480|720|1080|1440|2160|4320)p?/i);
-  if (resolutionMatch) {
-    const height = parseInt(resolutionMatch[1]);
-    if (height >= 360 && height <= 4320) {
-      metadata.resolution = `${height}p`;
-      if (height >= 2160) metadata.quality = '4K';
-      else if (height >= 1080) metadata.quality = 'FHD';
-      else if (height >= 720) metadata.quality = 'HD';
-      else metadata.quality = 'SD';
-    }
-  }
-  
-  // Extract codec hints from URL
-  const codecMatch = url.match(/(h264|h265|hevc|vp9|av1|avc1|aac|opus|mp3)/i);
-  if (codecMatch) {
-    metadata.codec = codecMatch[1].toUpperCase();
-  }
-  
-  // Extract bitrate/bandwidth from URL
-  const bitrateMatch = url.match(/(\d+)[km]?bps/i) || url.match(/bandwidth[=_](\d+)/i);
-  if (bitrateMatch) {
-    const bps = parseInt(bitrateMatch[1]);
-    if (bps > 1000) {
-      metadata.bitrate = `${Math.round(bps / 1000)}Mbps`;
-    } else {
-      metadata.bitrate = `${bps}Kbps`;
-    }
-  }
-  
-  // Estimate quality from file size (for non-HLS videos)
-  if (mediaType === 'video' && size > 0) {
-    const sizeMB = size / (1024 * 1024);
-    if (sizeMB > 500) metadata.estimatedQuality = 'High';
-    else if (sizeMB > 100) metadata.estimatedQuality = 'Medium';
-    else metadata.estimatedQuality = 'Low';
-  }
-  
-  // Check for HDR indicators
-  if (url.match(/hdr|dolby|vision|hlg/i)) {
-    metadata.hdr = true;
-  }
-  
-  return metadata;
-}
-
-function shellEscapeSingle(value) {
-  return String(value).replace(/'/g, `'\\''`);
-}
-
-function normalizeFilename(title) {
-  if (!title || !title.trim()) return 'output';
-  return title
-    .replace(/[/\\:*?"<>|]/g, '_')  // Replace invalid chars
-    .replace(/\s+/g, ' ')           // Normalize spaces
-    .trim()
-    .replace(/\.$/, '')             // Remove trailing period
-    .substring(0, 100);             // Limit length
-}
-
-function buildMpvHeaderOption(headers) {
-  const entries = Object.entries(headers || {});
-  if (!entries.length) return '';
-  // Format headers for --demuxer-lavf-o=http_header_fields using $'...' syntax
-  // Each header on its own line with \r\n separator
-  const headerLines = entries.map(([k, v]) => `${k}: ${v}`).join('\r\n');
-  return `--demuxer-lavf-o=http_header_fields=$'${headerLines}\r\n'`;
-}
-
-function buildMpvCommand(streamItem, subtitleItems = []) {
-  const streamUrl = streamItem?.url;
-  if (!streamUrl) return '';
-
-  const headers = streamItem.headers || {};
-
-  // Extract user-agent if present
-  const userAgent = headers['User-Agent'] || headers['user-agent'];
-  const otherHeaders = { ...headers };
-  delete otherHeaders['User-Agent'];
-  delete otherHeaders['user-agent'];
-
-  // Build header option for stream (using demuxer-lavf-o format)
-  const headerOpt = buildMpvHeaderOption(otherHeaders);
-
-  // Build user-agent option
-  const userAgentOpt = userAgent ? `  --user-agent='${shellEscapeSingle(userAgent)}' \\\n` : '';
-
-  // Build subtitle options - each subtitle gets its own --sub-file flag
-  const subOpts = subtitleItems
-    .filter((s) => s?.url)
-    .map((s) => {
-      return `  --sub-file='${shellEscapeSingle(s.url)}' \\\n`;
-    })
-    .join('');
-
-  // Build the command with proper line continuation
-  const parts = [
-    'mpv \\\n',
-    `  --force-window=immediate \\\n`,
-    `  --sub-auto=fuzzy \\\n`,
-    `  --demuxer-lavf-o=allowed_extensions=ALL \\\n`,
-    subOpts,
-    userAgentOpt,
-    headerOpt ? `  ${headerOpt} \\\n` : '',
-    `  '${shellEscapeSingle(streamUrl)}' \\\n`,
-    `  --msg-level=ffmpeg=trace,demuxer=trace,network=trace \\\n`,
-    `  --log-file=mpv-trace.log`
-  ];
-
-  return parts.filter(Boolean).join('');
-}
-
-function buildFfmpegHeaders(headers) {
-  const entries = Object.entries(headers || {});
-  if (!entries.length) return '';
-  // Format: 'Header1: value1\r\nHeader2: value2\r\n'
-  const joined = entries.map(([k, v]) => `${k}: ${v}`).join('\r\n');
-  return `-headers '${shellEscapeSingle(joined + '\r\n')}'`;
-}
-
-// Language code mapping for ffmpeg (ISO 639-2 codes where available) - keep in sync with popup.js LANGUAGE_NAMES
-const LANGUAGE_CODE_MAP = {
-  'en': 'eng', 'es': 'spa', 'fr': 'fre', 'de': 'ger', 'it': 'ita',
-  'pt': 'por', 'ru': 'rus', 'ja': 'jpn', 'ko': 'kor', 'zh': 'chi',
-  'ar': 'ara', 'hi': 'hin', 'tr': 'tur', 'pl': 'pol', 'nl': 'dut',
-  'sv': 'swe', 'da': 'dan', 'no': 'nor', 'fi': 'fin', 'el': 'gre',
-  'he': 'heb', 'th': 'tha', 'vi': 'vie', 'id': 'ind', 'ms': 'may',
-  'cs': 'cze', 'sk': 'slo', 'hu': 'hun', 'ro': 'rum', 'bg': 'bul',
-  'uk': 'ukr', 'hr': 'hrv', 'sr': 'srp', 'sl': 'slv', 'et': 'est',
-  'lv': 'lav', 'lt': 'lit', 'fa': 'per', 'ur': 'urd', 'bn': 'ben',
-  'ta': 'tam', 'te': 'tel', 'ml': 'mal', 'kn': 'kan', 'mr': 'mar',
-  'gu': 'guj', 'pa': 'pan', 'sw': 'swa', 'af': 'afr', 'ca': 'cat',
-  'eu': 'eus', 'gl': 'glg', 'hy': 'hye', 'ka': 'kat', 'mn': 'mon',
-  'ne': 'nep', 'si': 'sin', 'km': 'khm', 'lo': 'lao', 'my': 'mya',
-  'am': 'amh', 'zu': 'zul', 'xh': 'xho', 'yo': 'yor', 'ig': 'ibo',
-  'ha': 'hau', 'tl': 'tgl', 'jv': 'jav', 'su': 'sun', 'mg': 'mlg',
-  'nb': 'nob', 'nn': 'nno', 'zh-cn': 'chi', 'zh-tw': 'chi',
-  'pt-br': 'por', 'pt-pt': 'por', 'es-419': 'spa', 'en-gb': 'eng',
-  'en-us': 'eng'
-};
-
-function getFfmpegLanguageCode(langCode) {
-  if (!langCode) return null;
-  const normalized = langCode.toLowerCase();
-  return LANGUAGE_CODE_MAP[normalized] || LANGUAGE_CODE_MAP[normalized.split('-')[0]] || normalized;
-}
-
-function buildFfmpegCommand(streamItem, subtitleItems = [], outputFormat = 'mp4', outputFilename = null) {
-  const streamUrl = streamItem?.url;
-  if (!streamUrl) return '';
-
-  // Validate output format
-  const format = outputFormat === 'mkv' ? 'mkv' : 'mp4';
-
-  // Normalize and use provided filename or default to 'output'
-  const baseFilename = normalizeFilename(outputFilename) || 'output';
-  const finalFilename = `${baseFilename}.${format}`;
-
-  // Build header option for stream
-  const headerOpt = buildFfmpegHeaders(streamItem.headers || {});
-
-  // Filter valid subtitle items
-  const validSubtitles = subtitleItems.filter((s) => s?.url);
-
-  // Build command parts
-  const parts = ['ffmpeg'];
-
-  // Add logging and stats flags
-  parts.push('-loglevel error');
-  parts.push('-stats');
-
-  // Add headers (applies to all inputs)
-  if (headerOpt) {
-    parts.push(headerOpt);
-  }
-
-  // Add main stream input
-  parts.push(`-i '${shellEscapeSingle(streamUrl)}'`);
-
-  // Add subtitle inputs
-  validSubtitles.forEach((sub) => {
-    parts.push(`-i '${shellEscapeSingle(sub.url)}'`);
-  });
-
-  // Map streams based on output format
-  if (format === 'mkv') {
-    // For MKV: explicitly map only video and audio streams to avoid data streams
-    // that MKV doesn't support (e.g., timed metadata, ID3, etc.)
-    parts.push('-map 0:v');  // Map video streams from main input
-    parts.push('-map 0:a');  // Map audio streams from main input
-    validSubtitles.forEach((_, index) => {
-      parts.push(`-map ${index + 1}`);  // Map each subtitle input
-    });
-  } else {
-    // For MP4: map all streams from video input
-    parts.push('-map 0');
-    validSubtitles.forEach((_, index) => {
-      parts.push(`-map ${index + 1}`);  // Map each subtitle input
-    });
-  }
-
-  // Add output options
-  parts.push('-c copy');
-
-  // If we have subtitles, configure subtitle codec based on output format
-  if (validSubtitles.length > 0) {
-    if (format === 'mkv') {
-      // MKV supports various subtitle formats; use 'ass' for wide compatibility
-      // WebVTT cannot be directly muxed as 'srt', so we use 'ass' which MKV supports well
-      parts.push('-c:s ass');
-    } else {
-      // MP4 requires mov_text for subtitle compatibility
-      parts.push('-c:s mov_text');
-    }
-  }
-
-  // Add subtitle metadata (language and title) for each subtitle stream
-  validSubtitles.forEach((sub, index) => {
-    const langCode = sub.languageCode || sub.langCode;
-    const langName = sub.languageName || sub.langName;
-    
-    if (langCode) {
-      const ffmpegLangCode = getFfmpegLanguageCode(langCode);
-      parts.push(`-metadata:s:s:${index} language=${shellEscapeSingle(ffmpegLangCode)}`);
-    }
-    
-    if (langName) {
-      parts.push(`-metadata:s:s:${index} title='${shellEscapeSingle(langName)}'`);
-    } else if (langCode) {
-      // Use language code as title if no name provided
-      const ffmpegLangCode = getFfmpegLanguageCode(langCode);
-      parts.push(`-metadata:s:s:${index} title='${shellEscapeSingle(ffmpegLangCode.toUpperCase())}'`);
-    }
-  });
-
-  // Output filename
-  parts.push(`'${shellEscapeSingle(finalFilename)}'`);
-
-  return parts.filter(Boolean).join(' ');
-}
-
-async function downloadVideo(url, filename, headers = {}) {
-  // Build headers array for chrome.downloads API
-  // Filter out forbidden headers that chrome.downloads can't handle
-  const headerArray = [];
-  for (const [name, value] of Object.entries(headers)) {
-    const lowerName = name.toLowerCase();
-    if (!FORBIDDEN_HEADERS.has(lowerName)) {
-      headerArray.push({ name, value });
-    }
-  }
-
-  const downloadOptions = {
-    url: url,
-    filename: filename || 'video.mp4',
-    saveAs: false
-  };
-
-  // Add headers if present
-  if (headerArray.length > 0) {
-    downloadOptions.headers = headerArray;
-  }
-
-  return chrome.downloads.download(downloadOptions);
-}
-
-async function downloadSubtitle(url, filename, headers = {}) {
-  console.log('[ServiceWorker] downloadSubtitle called');
-  console.log('[ServiceWorker] URL:', url);
-  console.log('[ServiceWorker] Raw headers:', JSON.stringify(headers, null, 2));
-
-  // Build headers array for chrome.downloads API
-  // Filter out forbidden headers that chrome.downloads can't handle
-  const headerArray = [];
-  for (const [name, value] of Object.entries(headers)) {
-    const lowerName = name.toLowerCase();
-    if (!FORBIDDEN_HEADERS.has(lowerName)) {
-      headerArray.push({ name, value });
-      console.log('[ServiceWorker] Adding header to download:', name);
-    } else {
-      console.log('[ServiceWorker] Skipping forbidden header:', name);
-    }
-  }
-
-  const downloadOptions = {
-    url: url,
-    filename: filename || 'subtitle.vtt',
-    saveAs: false
-  };
-
-  // Add headers if present
-  if (headerArray.length > 0) {
-    downloadOptions.headers = headerArray;
-    console.log('[ServiceWorker] Download options with headers:', JSON.stringify(downloadOptions, null, 2));
-  } else {
-    console.log('[ServiceWorker] Download options without headers');
-  }
-
-  try {
-    const downloadId = await chrome.downloads.download(downloadOptions);
-    console.log('[ServiceWorker] Download started with ID:', downloadId);
-    return downloadId;
-  } catch (error) {
-    console.error('[ServiceWorker] Download failed:', error.message);
-    throw error;
-  }
-}
-
 async function updateBadge(tabId) {
-  const streamKey = `streams_${tabId}`;
-  const subKey = `subs_${tabId}`;
-  const data = await chrome.storage.local.get([streamKey, subKey]);
-  const streams = data[streamKey] || {};
-  const subs = data[subKey] || {};
-  const count = Object.keys(streams).length + Object.keys(subs).length;
+  const counts = await storage.getTabItemCounts(tabId);
+  const count = counts.streams + counts.subtitles;
   const text = count > 0 ? String(count) : '';
   try {
     await chrome.action.setBadgeText({ text, tabId });
@@ -932,7 +143,18 @@ chrome.webRequest.onResponseStarted.addListener(
   async (details) => {
     const { requestId, url, tabId, responseHeaders = [], statusCode, method } = details;
     const reqHeaders = pendingReqHeaders[requestId] || [];
-    delete pendingReqHeaders[requestId];
+
+    // BUG FIX (Phase 1): Use TTL-based cleanup instead of immediate deletion
+    // This prevents race conditions where headers are deleted before async operations complete
+    // Clear any existing timer for this requestId to avoid duplicate cleanups
+    if (headerCleanupTimers.has(requestId)) {
+      clearTimeout(headerCleanupTimers.get(requestId));
+    }
+    // Schedule cleanup after 60 seconds
+    headerCleanupTimers.set(requestId, setTimeout(() => {
+      delete pendingReqHeaders[requestId];
+      headerCleanupTimers.delete(requestId);
+    }, HEADER_TTL_MS));
 
     if (!url.startsWith('http') || tabId < 0) return;
     if (statusCode < 200 || statusCode >= 300) return;
@@ -995,17 +217,13 @@ chrome.webRequest.onResponseStarted.addListener(
     const sanitizedHeaders = sanitizeHeaders(reqHeaders);
     const timestamp = Date.now();
     const name = deriveFilename(url, responseHeaders, kind === 'stream' ? 'stream.m3u8' : 'subtitle');
-    const key = kind === 'stream' ? `streams_${tabId}` : `subs_${tabId}`;
 
     // Early-exit optimization: Check for duplicates and limits before expensive operations
-    // Note: The actual duplicate check inside queuedSave is the authoritative check
-    const stored = await chrome.storage.local.get([key]);
-    const items = stored[key] || {};
-
-    if (Object.values(items).some((item) => item.url === url)) {
+    // Note: The actual duplicate check inside storage.addItem is the authoritative check
+    if (await storage.hasItem(tabId, url, kind)) {
       return;
     }
-    if (Object.keys(items).length >= MAX_ITEMS_PER_TAB) {
+    if (await storage.isLimitReached(tabId, kind)) {
       return;
     }
 
@@ -1015,9 +233,10 @@ chrome.webRequest.onResponseStarted.addListener(
     const itemData = {
       url, format, name, size, headers: fullHeaders, tabId, timestamp, kind,
       mediaType,
+      requestId,
       ...metadata
     };
-    
+
     // For HLS streams, check if it's a master playlist and parse variants
     if (mediaType === 'hls') {
       try {
@@ -1041,13 +260,13 @@ chrome.webRequest.onResponseStarted.addListener(
           url: url,
           headers: safeHeaders
         });
-        
+
         console.log('[ServiceWorker] Received response from content script:', response);
 
         if (response && response.success) {
           // Parse the m3u8 content in the service worker (all heavy logic stays here)
           const playlistInfo = parseHLSMasterPlaylistContent(url, response.content);
-          await enrichHlsItemWithDuration(itemData, playlistInfo, tabId);
+          await enrichHlsItem(itemData, playlistInfo, tabId, ensureContentScriptReady, getSafeHeadersForContentScript);
         }
       } catch (e) {
         // If content script messaging fails (e.g., content script not loaded yet),
@@ -1055,16 +274,16 @@ chrome.webRequest.onResponseStarted.addListener(
         console.warn('Content script fetch failed, trying fallback:', e);
         try {
           const playlistInfo = await parseHLSMasterPlaylist(url, fullHeaders);
-          await enrichHlsItemWithDuration(itemData, playlistInfo, tabId);
+          await enrichHlsItem(itemData, playlistInfo, tabId, ensureContentScriptReady, getSafeHeadersForContentScript);
         } catch (fallbackError) {
           console.warn('Fallback parse also failed:', fallbackError);
         }
       }
     }
-    
-    const result = await queuedSave(key, requestId, itemData, url);
 
-    // If queuedSave returned null, it means the item was a duplicate or limit was reached
+    const result = await storage.addItem(tabId, itemData);
+
+    // If storage.addItem returned null, it means the item was a duplicate or limit was reached
     if (result === null) {
       return;
     }
@@ -1082,12 +301,19 @@ chrome.webRequest.onResponseStarted.addListener(
 );
 
 chrome.tabs.onRemoved.addListener(async (tabId) => {
-  await chrome.storage.local.remove([`subs_${tabId}`, `streams_${tabId}`]);
+  // BUG FIX (Phase 1): Clean up content script cache when tab is closed
+  contentScriptReadyCache.delete(tabId);
+  await storage.clearTab(tabId);
 });
 
 chrome.tabs.onUpdated.addListener(async (tabId, changeInfo) => {
   if (changeInfo.status === 'loading' && changeInfo.url) {
-    await chrome.storage.local.remove([`subs_${tabId}`, `streams_${tabId}`]);
+    // BUG FIX (Phase 1): Clear content script ready cache on navigation
+    // This ensures content script is re-injected after page navigation
+    contentScriptReadyCache.delete(tabId);
+    console.log(`[ServiceWorker] Cleared content script cache for tab ${tabId} due to navigation`);
+
+    await storage.clearTab(tabId);
     await updateBadge(tabId);
   }
 });
@@ -1095,15 +321,15 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo) => {
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message.cmd === 'GET_ITEMS') {
     const tabId = message.tabId;
-    chrome.storage.local.get([`streams_${tabId}`, `subs_${tabId}`], (data) => {
-      sendResponse({ streams: data[`streams_${tabId}`] || {}, subtitles: data[`subs_${tabId}`] || {} });
+    storage.getTabItems(tabId).then((items) => {
+      sendResponse(items);
     });
     return true;
   }
 
   if (message.cmd === 'CLEAR_ITEMS') {
     const tabId = message.tabId;
-    chrome.storage.local.remove([`streams_${tabId}`, `subs_${tabId}`], () => {
+    storage.clearTab(tabId).then(() => {
       updateBadge(tabId);
       sendResponse();
     });
