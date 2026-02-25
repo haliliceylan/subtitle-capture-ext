@@ -3,6 +3,8 @@
  * @module commands
  */
 
+// Note: STRIP_HEADERS not needed - we only use essential headers for mpv
+
 /**
  * Escapes a string for safe use within single quotes in shell commands.
  * @param {string} value - The string to escape.
@@ -29,17 +31,18 @@ export function normalizeFilename(title) {
 
 /**
  * Builds mpv HTTP header option string.
- * Format: --http-header-fields='Header1: value1','Header2: value2'
+ * Format: --stream-lavf-o=http_header_fields=$'Header1: value1\r\nHeader2: value2\r\n'
+ * Uses ANSI-C quoting ($'...') to support CRLF separators required by ffmpeg.
  * @param {Object.<string, string>} headers - Headers object.
  * @returns {string} The mpv header option string, or empty string if no headers.
  */
 export function buildMpvHeaderOption(headers) {
   const entries = Object.entries(headers || {});
   if (!entries.length) return '';
-  // Format headers as comma-separated quoted strings
-  // Format: --http-header-fields='Header1: value1','Header2: value2'
-  const quotedHeaders = entries.map(([k, v]) => `'${shellEscapeSingle(k)}: ${shellEscapeSingle(v)}'`).join(',');
-  return `--http-header-fields=${quotedHeaders}`;
+  // Format headers with CRLF separators using ANSI-C quoting
+  // Format: --stream-lavf-o=http_header_fields=$'Header1: value1\r\nHeader2: value2\r\n'
+  const formattedHeaders = entries.map(([k, v]) => `${k}: ${v}`).join('\\r\\n');
+  return `--stream-lavf-o=http_header_fields=$'${formattedHeaders}\\r\\n'`;
 }
 
 /**
@@ -59,12 +62,19 @@ export function buildMpvCommand(streamItem, subtitleItems = []) {
 
   // Extract user-agent if present
   const userAgent = headers['User-Agent'] || headers['user-agent'];
-  const otherHeaders = { ...headers };
-  delete otherHeaders['User-Agent'];
-  delete otherHeaders['user-agent'];
 
-  // Build header option for stream (using demuxer-lavf-o format)
-  const headerOpt = buildMpvHeaderOption(otherHeaders);
+  // Only keep essential headers for mpv
+  const essentialHeaders = {};
+  const headerKeys = ['Accept', 'Referer', 'Origin'];
+  for (const key of headerKeys) {
+    const value = headers[key] || headers[key.toLowerCase()];
+    if (value) {
+      essentialHeaders[key] = value;
+    }
+  }
+
+  // Build header option for stream (using stream-lavf-o format)
+  const headerOpt = buildMpvHeaderOption(essentialHeaders);
 
   // Build user-agent option
   const userAgentOpt = userAgent ? `  --user-agent='${shellEscapeSingle(userAgent)}' \\\n` : '';
@@ -78,6 +88,7 @@ export function buildMpvCommand(streamItem, subtitleItems = []) {
     .join('');
 
   // Build the command with proper line continuation
+  // URL comes last (after log options)
   const parts = [
     'mpv \\\n',
     `  --force-window=immediate \\\n`,
@@ -86,9 +97,9 @@ export function buildMpvCommand(streamItem, subtitleItems = []) {
     subOpts,
     userAgentOpt,
     headerOpt ? `  ${headerOpt} \\\n` : '',
-    `  '${shellEscapeSingle(streamUrl)}' \\\n`,
     `  --msg-level=ffmpeg=trace,demuxer=trace,network=trace \\\n`,
-    `  --log-file=mpv-trace.log`
+    `  --log-file=mpv-trace.log \\\n`,
+    `  '${shellEscapeSingle(streamUrl)}'`
   ];
 
   return parts.filter(Boolean).join('');
