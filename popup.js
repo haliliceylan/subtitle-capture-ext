@@ -178,8 +178,6 @@ function initTheme() {
   const commandBar = document.getElementById('command-bar');
   const commandSelection = document.getElementById('command-selection');
 
-  const btnCommandDownloadSubs = document.getElementById('btn-command-download-subs');
-  const commandRowSecondary = document.getElementById('command-row-secondary');
   const btnCommandMpv = document.getElementById('btn-command-mpv');
   const btnCommandFfmpeg = document.getElementById('btn-command-ffmpeg');
   const ffmpegFormatSelect = document.getElementById('ffmpeg-format-select');
@@ -313,54 +311,6 @@ function initTheme() {
 
   // Theme toggle button
   btnThemeToggle.addEventListener('click', cycleTheme);
-
-  // Download Selected Subtitles button handler
-  btnCommandDownloadSubs.addEventListener('click', () => {
-    if (btnCommandDownloadSubs.disabled) return;
-
-    const selectedSubs = getSelectedSubtitles();
-    if (selectedSubs.length === 0) {
-      showToast('No subtitles selected', true);
-      return;
-    }
-
-    setButtonLoading(btnCommandDownloadSubs, true);
-
-    // Download each selected subtitle
-    let successCount = 0;
-    let failCount = 0;
-
-    selectedSubs.forEach((sub, index) => {
-      // Use a small delay between downloads to avoid overwhelming the browser
-      setTimeout(() => {
-        chrome.runtime.sendMessage({
-          cmd: 'DOWNLOAD_SUBTITLE',
-          url: sub.url,
-          filename: sub.name || `subtitle_${index + 1}.${sub.format?.toLowerCase() || 'vtt'}`,
-          headers: sub.headers || {}
-        }, (response) => {
-          if (chrome.runtime.lastError) {
-            console.error('Failed to download subtitle:', chrome.runtime.lastError.message);
-            failCount++;
-            if (failCount + successCount === selectedSubs.length) {
-              showToast(`Downloaded ${successCount}, failed ${failCount}`, failCount > 0);
-              setButtonLoading(btnCommandDownloadSubs, false);
-            }
-            return;
-          }
-          if (response?.success) {
-            successCount++;
-          } else {
-            failCount++;
-          }
-          if (failCount + successCount === selectedSubs.length) {
-            showToast(`Downloaded ${successCount} subtitle${successCount !== 1 ? 's' : ''}`, failCount > 0);
-            setButtonLoading(btnCommandDownloadSubs, false);
-          }
-        });
-      }, index * 100); // 100ms delay between each download
-    });
-  });
 
   // Select all subtitles functionality - now in section header
   function handleSelectAllClick() {
@@ -590,15 +540,6 @@ function initTheme() {
   }
 
   function updateCommandBarButtons(selectionState, hasStream, subtitleCount) {
-    // Determine visibility for secondary row
-    const showSecondaryRow = hasStream || subtitleCount > 0;
-    commandRowSecondary.style.display = showSecondaryRow ? 'flex' : 'none';
-
-    // Download Subtitles button: visible and enabled only when subtitles are selected
-    const showDownloadSubs = subtitleCount > 0;
-    btnCommandDownloadSubs.style.display = showDownloadSubs ? 'flex' : 'none';
-    btnCommandDownloadSubs.disabled = !showDownloadSubs;
-
     // MPV button: enabled when stream is selected
     btnCommandMpv.disabled = !hasStream;
 
@@ -1722,14 +1663,7 @@ function initTheme() {
     
     // Build menu items based on item type
     const menuItems = [];
-    
-    // All items get Download
-    menuItems.push({
-      action: 'download',
-      label: 'Download',
-      icon: '⬇️'
-    });
-    
+
     // Streams and video files get Copy cURL option
     if (itemType === 'stream' || itemType === 'video-file') {
       menuItems.push({
@@ -1824,26 +1758,7 @@ function initTheme() {
           showToast('Copy failed', true);
         }
         break;
-        
-      case 'download':
-        chrome.runtime.sendMessage({
-          cmd: 'DOWNLOAD_VIDEO',
-          url: item.url,
-          filename: item.name || 'download',
-          headers: item.headers || {}
-        }, (response) => {
-          if (chrome.runtime.lastError) {
-            showToast('Download failed', true);
-            return;
-          }
-          if (response?.success) {
-            showToast('Download started!');
-          } else {
-            showToast('Download failed: ' + (response?.error || 'Unknown error'), true);
-          }
-        });
-        break;
-        
+
       case 'curl':
         // Build and copy curl command
         const headers = item.headers || {};
